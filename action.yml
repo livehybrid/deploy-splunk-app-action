@@ -42,6 +42,7 @@ runs:
       - name: Setup Environment
         shell: bash
         run: |
+          echo "splunk-add-on-ucc-framework" > requirements_dev.txt
           pip install splunk-add-on-ucc-framework
 
       - name: Determine Version
