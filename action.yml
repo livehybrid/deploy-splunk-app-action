@@ -76,16 +76,16 @@ jobs:
         name: dist
         path: dist/
 
-    - name: Convert Included Tags to Matrix Format
-      id: convert-tags
-      run: |
-        matrix=$(echo "${{ inputs.included-tags }}" | jq -R 'split(",")')
-        echo "::set-output name=matrix-tags::$matrix"
-      shell: bash
+    # - name: Convert Included Tags to Matrix Format
+    #   id: convert-tags
+    #   run: |
+    #     matrix=$(echo "${{ inputs.included-tags }}" | jq -R 'split(",")')
+    #     echo "::set-output name=matrix-tags::$matrix"
+    #   shell: bash
 
     - name: Split Tags and Iterate
       run: |
-        tags="${{ inputs.tags }}"
+        tags="${{ inputs.included-tags }}"
         IFS=',' read -ra tag_array <<< "$tags"
         success_tags=()
         for tag in "${tag_array[@]}"; do
