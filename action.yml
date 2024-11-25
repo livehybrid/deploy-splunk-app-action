@@ -17,6 +17,9 @@ inputs:
   splunkbase-password:
     description: Splunkbase password for AppInspect API.
     required: true
+  github-token:
+    description: secrets.GITHUB_TOKEN with permissions to write to checks endpoint.
+    required: true
 
 outputs:
   artifact-path:
@@ -110,7 +113,7 @@ appinspect:
       with:
         json_file: appinspect_result_${{ matrix.tags }}.json
         tag: "${{ matrix.tags }}"
-        github_token: ${{ secrets.GITHUB_TOKEN }}
+        github_token: ${{ inputs.github-token }}
         include_not_applicable: False
 
 quality-appinspect-api:
