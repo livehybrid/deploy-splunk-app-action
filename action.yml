@@ -27,9 +27,8 @@ outputs:
   reports-path:
     description: Path to quality reports generated.
 
-runs:
-  using: "composite"
-  steps:
+jobs:
+  package:
     - name: Checkout code
       uses: actions/checkout@v4
 
@@ -40,11 +39,13 @@ runs:
         cache: pip
 
     - name: Setup Environment
+      shell: bash
       run: |
         pip install splunk-add-on-ucc-framework
 
     - name: Determine Version
       id: version
+      shell: bash
       run: |
         echo "Version is now calculated by ucc-gen"
         SHORT_COMMIT_HASH=$(git rev-parse --short HEAD)
@@ -63,6 +64,7 @@ runs:
         version: ${{ env.VERSION_WITH_HASH }}
 
     - name: Generate Package tarball
+      shell: bash
       run: |
         mkdir -p dist
         mv output/* output/app
@@ -74,16 +76,12 @@ runs:
         name: dist
         path: dist/
 
-convert-tags:
-  runs-on: ubuntu-latest
-  outputs:
-    matrix-tags: ${{ steps.convert-tags.outputs.matrix-tags }}
-  steps:
     - name: Convert Included Tags to Matrix Format
       id: convert-tags
       run: |
         matrix=$(echo "${{ inputs.included-tags }}" | jq -R 'split(",")')
         echo "::set-output name=matrix-tags::$matrix"
+      shell: bash
 
 appinspect:
   name: quality-appinspect-cli
