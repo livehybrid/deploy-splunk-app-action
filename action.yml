@@ -7,25 +7,6 @@ inputs:
     description: Python version to use for the environment.
     required: false
     default: "3.9"
-  included-tags:
-    description: Comma-separated list of tags for appinspect scanning.
-    required: true
-    default: "cloud,private_victoria,future"
-  splunkbase-username:
-    description: Splunkbase username for AppInspect API.
-    required: true
-  splunkbase-password:
-    description: Splunkbase password for AppInspect API.
-    required: true
-  github-token:
-    description: secrets.GITHUB_TOKEN with permissions to write to checks endpoint.
-    required: true
-
-outputs:
-  artifact-path:
-    description: The path to the packaged Splunk app artifacts.
-  reports-path:
-    description: Path to quality reports generated.
 
 runs:
   using: "composite"
@@ -78,47 +59,6 @@ runs:
           name: dist
           path: dist/
 
-      # - name: Convert Included Tags to Matrix Format
-      #   id: convert-tags
-      #   run: |
-      #     matrix=$(echo "${{ inputs.included-tags }}" | jq -R 'split(",")')
-      #     echo "::set-output name=matrix-tags::$matrix"
-      #   shell: bash
-
-      - name: Split Tags and Iterate
-        run: |
-          tags="${{ inputs.included-tags }}"
-          IFS=',' read -ra tag_array <<< "$tags"
-          success_tags=()
-          for tag in "${tag_array[@]}"; do
-            echo "Running AppInspect CLI for tag: $tag"
-            # Run the action via docker or directly as part of the script
-            result=$(docker run --rm \
-              -v "$(pwd)/dist:/dist" \
-              ghcr.io/splunk/appinspect-cli-action/appinspect-cli-action:v2.8.1 \
-              --app_path /dist \
-              --included_tags "$tag" \
-              --result_file "result_${tag}.json")
-
-            # Check if the action succeeded
-            if [[ $? -eq 0 ]]; then
-              success_tags+=("$tag")
-              echo "Tag $tag passed."
-            else
-              echo "Tag $tag failed."
-            fi
-          done
-
-          echo "success-tags=${success_tags[@]}" >> $GITHUB_OUTPUT
-        shell: bash
-
-      # - name: Run Generate Markdown Action
-      #   uses: livehybrid/generate-appinspect-markdown-action@main
-      #   with:
-      #     json_file: appinspect_result_${{ matrix.tags }}.json
-      #     tag: "${{ matrix.tags }}"
-      #     github_token: ${{ inputs.github-token }}
-      #     include_not_applicable: False
 
   # quality-appinspect-api:
   #   name: quality-appinspect-api
