@@ -92,18 +92,23 @@ runs:
           success_tags=()
           for tag in "${tag_array[@]}"; do
             echo "Running AppInspect CLI for tag: $tag"
-            gh_action_output=$(gh run-script \
-              -r splunk/appinspect-cli-action@v2.8.1 \
-              -i app_path="${{ inputs.app-path }}" \
-              -i included_tags="$tag" \
-              -o result_file="result_${tag}.json" \
-              --token "${{ inputs.github-token }}")
-            
-            # Assume CLI passes if no errors
+            # Run the action via docker or directly as part of the script
+            result=$(docker run --rm \
+              -v "$(pwd)/dist:/dist" \
+              splunk/appinspect-cli-action:v2.8.1 \
+              --app_path /dist \
+              --included_tags "$tag" \
+              --result_file "result_${tag}.json")
+
+            # Check if the action succeeded
             if [[ $? -eq 0 ]]; then
               success_tags+=("$tag")
+              echo "Tag $tag passed."
+            else
+              echo "Tag $tag failed."
             fi
           done
+
           echo "success-tags=${success_tags[@]}" >> $GITHUB_OUTPUT
         shell: bash
 
