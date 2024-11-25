@@ -27,109 +27,111 @@ outputs:
   reports-path:
     description: Path to quality reports generated.
 
-jobs:
-  package:
-    - name: Checkout code
-      uses: actions/checkout@v4
+runs:
+  
+  using: "composite"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Setup Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ inputs.python-version }}
-        cache: pip
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
 
-    - name: Setup Environment
-      shell: bash
-      run: |
-        pip install splunk-add-on-ucc-framework
+      - name: Setup Environment
+        shell: bash
+        run: |
+          pip install splunk-add-on-ucc-framework
 
-    - name: Determine Version
-      id: version
-      shell: bash
-      run: |
-        echo "Version is now calculated by ucc-gen"
-        SHORT_COMMIT_HASH=$(git rev-parse --short HEAD)
-        ref_type=${GITHUB_REF#refs/*/}
-        if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-          TAG_VERSION=${GITHUB_REF#refs/tags/v}
-        else
-          TAG_VERSION="1.0.0"
-        fi
-        VERSION_WITH_HASH="${TAG_VERSION}+${SHORT_COMMIT_HASH}"
-        echo "VERSION_WITH_HASH=${VERSION_WITH_HASH}" >> $GITHUB_ENV
-
-    - name: Generate app with ucc-gen
-      uses: splunk/addonfactory-ucc-generator-action@v2.0.1
-      with:
-        version: ${{ env.VERSION_WITH_HASH }}
-
-    - name: Generate Package tarball
-      shell: bash
-      run: |
-        mkdir -p dist
-        mv output/* output/app
-        ucc-gen package -o dist --path output/app
-
-    - name: Upload Package Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: dist
-        path: dist/
-
-    # - name: Convert Included Tags to Matrix Format
-    #   id: convert-tags
-    #   run: |
-    #     matrix=$(echo "${{ inputs.included-tags }}" | jq -R 'split(",")')
-    #     echo "::set-output name=matrix-tags::$matrix"
-    #   shell: bash
-
-    - name: Split Tags and Iterate
-      run: |
-        tags="${{ inputs.included-tags }}"
-        IFS=',' read -ra tag_array <<< "$tags"
-        success_tags=()
-        for tag in "${tag_array[@]}"; do
-          echo "Running AppInspect CLI for tag: $tag"
-          gh_action_output=$(gh run-script \
-            -r splunk/appinspect-cli-action@v2.8.1 \
-            -i app_path="${{ inputs.app-path }}" \
-            -i included_tags="$tag" \
-            -o result_file="result_${tag}.json" \
-            --token "${{ inputs.github-token }}")
-          
-          # Assume CLI passes if no errors
-          if [[ $? -eq 0 ]]; then
-            success_tags+=("$tag")
+      - name: Determine Version
+        id: version
+        shell: bash
+        run: |
+          echo "Version is now calculated by ucc-gen"
+          SHORT_COMMIT_HASH=$(git rev-parse --short HEAD)
+          ref_type=${GITHUB_REF#refs/*/}
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            TAG_VERSION="1.0.0"
           fi
-        done
-        echo "success-tags=${success_tags[@]}" >> $GITHUB_OUTPUT
-      shell: bash
+          VERSION_WITH_HASH="${TAG_VERSION}+${SHORT_COMMIT_HASH}"
+          echo "VERSION_WITH_HASH=${VERSION_WITH_HASH}" >> $GITHUB_OUTPUT
 
-    # - name: Run Generate Markdown Action
-    #   uses: livehybrid/generate-appinspect-markdown-action@main
-    #   with:
-    #     json_file: appinspect_result_${{ matrix.tags }}.json
-    #     tag: "${{ matrix.tags }}"
-    #     github_token: ${{ inputs.github-token }}
-    #     include_not_applicable: False
+      - name: Generate app with ucc-gen
+        uses: splunk/addonfactory-ucc-generator-action@v2.0.1
+        with:
+          version: ${{ steps.version.VERSION_WITH_HASH }}
 
-# quality-appinspect-api:
-#   name: quality-appinspect-api
-#   needs:
-#     - appinspect
-#   runs-on: ubuntu-latest
-#   steps:
-#     - name: Run AppInspect API
-#       uses: splunk/appinspect-api-action@v3.0
-#       with:
-#         username: "${{ inputs.splunkbase-username }}"
-#         password: "${{ inputs.splunkbase-password }}"
-#         app_path: dist
-#         included_tags: private_victoria
-#         excluded_tags: offensive
+      - name: Generate Package tarball
+        shell: bash
+        run: |
+          mkdir -p dist
+          mv output/* output/app
+          ucc-gen package -o dist --path output/app
 
-#     - name: Upload Reports
-#       uses: actions/upload-artifact@v4
-#       with:
-#         name: reports
-#         path: reports/
+      - name: Upload Package Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # - name: Convert Included Tags to Matrix Format
+      #   id: convert-tags
+      #   run: |
+      #     matrix=$(echo "${{ inputs.included-tags }}" | jq -R 'split(",")')
+      #     echo "::set-output name=matrix-tags::$matrix"
+      #   shell: bash
+
+      - name: Split Tags and Iterate
+        run: |
+          tags="${{ inputs.included-tags }}"
+          IFS=',' read -ra tag_array <<< "$tags"
+          success_tags=()
+          for tag in "${tag_array[@]}"; do
+            echo "Running AppInspect CLI for tag: $tag"
+            gh_action_output=$(gh run-script \
+              -r splunk/appinspect-cli-action@v2.8.1 \
+              -i app_path="${{ inputs.app-path }}" \
+              -i included_tags="$tag" \
+              -o result_file="result_${tag}.json" \
+              --token "${{ inputs.github-token }}")
+            
+            # Assume CLI passes if no errors
+            if [[ $? -eq 0 ]]; then
+              success_tags+=("$tag")
+            fi
+          done
+          echo "success-tags=${success_tags[@]}" >> $GITHUB_OUTPUT
+        shell: bash
+
+      # - name: Run Generate Markdown Action
+      #   uses: livehybrid/generate-appinspect-markdown-action@main
+      #   with:
+      #     json_file: appinspect_result_${{ matrix.tags }}.json
+      #     tag: "${{ matrix.tags }}"
+      #     github_token: ${{ inputs.github-token }}
+      #     include_not_applicable: False
+
+  # quality-appinspect-api:
+  #   name: quality-appinspect-api
+  #   needs:
+  #     - appinspect
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Run AppInspect API
+  #       uses: splunk/appinspect-api-action@v3.0
+  #       with:
+  #         username: "${{ inputs.splunkbase-username }}"
+  #         password: "${{ inputs.splunkbase-password }}"
+  #         app_path: dist
+  #         included_tags: private_victoria
+  #         excluded_tags: offensive
+
+  #     - name: Upload Reports
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: reports
+  #         path: reports/
