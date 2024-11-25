@@ -59,24 +59,3 @@ runs:
           name: dist
           path: dist/
 
-
-  # quality-appinspect-api:
-  #   name: quality-appinspect-api
-  #   needs:
-  #     - appinspect
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Run AppInspect API
-  #       uses: splunk/appinspect-api-action@v3.0
-  #       with:
-  #         username: "${{ inputs.splunkbase-username }}"
-  #         password: "${{ inputs.splunkbase-password }}"
-  #         app_path: dist
-  #         included_tags: private_victoria
-  #         excluded_tags: offensive
-
-  #     - name: Upload Reports
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: reports
-  #         path: reports/

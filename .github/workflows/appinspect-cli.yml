@@ -1,0 +1,38 @@
+on:
+  workflow_call:  
+    inputs:
+      tags:
+        required: true
+        type: string
+    secrets:
+      token:
+        required: true
+jobs:
+    appinspect:
+      runs-on: ubuntu-latest
+      strategy:
+        fail-fast: false
+        matrix:
+          tags: ${{ inputs.tags }}
+      steps:
+        - uses: actions/checkout@v4
+        - uses: actions/download-artifact@v4
+          with:
+            name: dist
+            path: dist/
+        - name: scan
+          uses: splunk/appinspect-cli-action@v2.8.1
+          with:
+            app_path: dist/
+            included_tags: ${{ matrix.tags }}
+            result_file: appinspect_result_${{ matrix.tags }}.json
+
+        - name: Run Generate Markdown Action
+          id: generate-markdown
+          if: always()
+          uses: livehybrid/generate-appinspect-markdown-action@main
+          with:
+            json_file: "appinspect_result_${{ matrix.tags }}.json"
+            tag: "${{ matrix.tags }}"
+            github_token: ${{ secrets.GITHUB_TOKEN }}
+            include_not_applicable: False
