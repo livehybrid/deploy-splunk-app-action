@@ -95,7 +95,7 @@ runs:
             # Run the action via docker or directly as part of the script
             result=$(docker run --rm \
               -v "$(pwd)/dist:/dist" \
-              splunk/appinspect-cli-action:v2.8.1 \
+              ghcr.io/splunk/appinspect-cli-action/appinspect-cli-action:v2.8.1 \
               --app_path /dist \
               --included_tags "$tag" \
               --result_file "result_${tag}.json")
