@@ -1,5 +1,12 @@
 on:
   workflow_call:
+    inputs:
+      splunkbase-username:
+        required: true
+        type: string
+      splunkbase-password:
+        required: true
+        type: string
 
 jobs:
   quality-appinspect-api:

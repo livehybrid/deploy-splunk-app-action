@@ -8,12 +8,27 @@ on:
       token:
         required: true
 jobs:
+    convert-tags:
+        name: Convert Included Tags to Matrix Format
+        runs-on: ubuntu-latest
+        outputs:
+          matrix-tags: ${{ steps.convert.outputs.matrix-tags }}
+        steps:
+          - name: Convert Tags
+            id: convert
+            shell: bash
+            run: |
+              tags="${{ inputs.tags }}"
+              matrix=$(echo "$tags" | jq -R 'split(",")')
+              echo "matrix-tags=$matrix" >> $GITHUB_OUTPUT
+
     appinspect:
       runs-on: ubuntu-latest
+      needs: convert-tags
       strategy:
         fail-fast: false
         matrix:
-          tags: ${{ inputs.tags }}
+          tags: ${{ needs.convert-tags.outputs.matrix-tags }}
       steps:
         - uses: actions/checkout@v4
         - uses: actions/download-artifact@v4
