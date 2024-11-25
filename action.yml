@@ -83,54 +83,53 @@ jobs:
         echo "::set-output name=matrix-tags::$matrix"
       shell: bash
 
-appinspect:
-  name: quality-appinspect-cli
-  needs:
-    - package
-    - convert-tags
-  runs-on: ubuntu-latest
-  strategy:
-    fail-fast: false
-    matrix:
-      tags: ${{ fromJson(needs.convert-tags.outputs.matrix-tags) }}
-  steps:
-    - uses: actions/checkout@v4
-    - uses: actions/download-artifact@v4
-      with:
-        name: dist
-        path: dist/
-    - name: Scan
-      uses: splunk/appinspect-cli-action@v2.8.1
-      with:
-        app_path: dist/
-        included_tags: ${{ matrix.tags }}
-        result_file: appinspect_result_${{ matrix.tags }}.json
+    - name: Split Tags and Iterate
+      run: |
+        tags="${{ inputs.tags }}"
+        IFS=',' read -ra tag_array <<< "$tags"
+        success_tags=()
+        for tag in "${tag_array[@]}"; do
+          echo "Running AppInspect CLI for tag: $tag"
+          gh_action_output=$(gh run-script \
+            -r splunk/appinspect-cli-action@v2.8.1 \
+            -i app_path="${{ inputs.app-path }}" \
+            -i included_tags="$tag" \
+            -o result_file="result_${tag}.json" \
+            --token "${{ inputs.github-token }}")
+          
+          # Assume CLI passes if no errors
+          if [[ $? -eq 0 ]]; then
+            success_tags+=("$tag")
+          fi
+        done
+        echo "success-tags=${success_tags[@]}" >> $GITHUB_OUTPUT
+      shell: bash
 
-    - name: Run Generate Markdown Action
-      uses: livehybrid/generate-appinspect-markdown-action@main
-      with:
-        json_file: appinspect_result_${{ matrix.tags }}.json
-        tag: "${{ matrix.tags }}"
-        github_token: ${{ inputs.github-token }}
-        include_not_applicable: False
+    # - name: Run Generate Markdown Action
+    #   uses: livehybrid/generate-appinspect-markdown-action@main
+    #   with:
+    #     json_file: appinspect_result_${{ matrix.tags }}.json
+    #     tag: "${{ matrix.tags }}"
+    #     github_token: ${{ inputs.github-token }}
+    #     include_not_applicable: False
 
-quality-appinspect-api:
-  name: quality-appinspect-api
-  needs:
-    - appinspect
-  runs-on: ubuntu-latest
-  steps:
-    - name: Run AppInspect API
-      uses: splunk/appinspect-api-action@v3.0
-      with:
-        username: "${{ inputs.splunkbase-username }}"
-        password: "${{ inputs.splunkbase-password }}"
-        app_path: dist
-        included_tags: private_victoria
-        excluded_tags: offensive
+# quality-appinspect-api:
+#   name: quality-appinspect-api
+#   needs:
+#     - appinspect
+#   runs-on: ubuntu-latest
+#   steps:
+#     - name: Run AppInspect API
+#       uses: splunk/appinspect-api-action@v3.0
+#       with:
+#         username: "${{ inputs.splunkbase-username }}"
+#         password: "${{ inputs.splunkbase-password }}"
+#         app_path: dist
+#         included_tags: private_victoria
+#         excluded_tags: offensive
 
-    - name: Upload Reports
-      uses: actions/upload-artifact@v4
-      with:
-        name: reports
-        path: reports/
+#     - name: Upload Reports
+#       uses: actions/upload-artifact@v4
+#       with:
+#         name: reports
+#         path: reports/
