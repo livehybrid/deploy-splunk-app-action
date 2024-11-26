@@ -1,12 +1,10 @@
 on:
   workflow_call:
-    inputs:
-      splunkbase-username:
+    secrets:
+      splunkbase_username:
         required: true
-        type: string
-      splunkbase-password:
+      splunkbase_password:
         required: true
-        type: string
 
 jobs:
   quality-appinspect-api:
@@ -19,8 +17,8 @@ jobs:
       - name: Run AppInspect API
         uses: splunk/appinspect-api-action@v3.0
         with:
-          username: "${{ inputs.splunkbase-username }}"
-          password: "${{ inputs.splunkbase-password }}"
+          username: "${{ secrets.splunkbase_username }}"
+          password: "${{ secrets.splunkbase_password }}"
           app_path: dist
           included_tags: private_victoria
           excluded_tags: offensive
