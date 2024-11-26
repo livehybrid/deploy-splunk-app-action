@@ -28,7 +28,7 @@ jobs:
       strategy:
         fail-fast: false
         matrix:
-          tags: ${{ needs.convert-tags.outputs.matrix-tags }}
+          tags: ${{ fromJson(needs.convert-tags.outputs.matrix-tags) }}
       steps:
         - uses: actions/checkout@v4
         - uses: actions/download-artifact@v4
