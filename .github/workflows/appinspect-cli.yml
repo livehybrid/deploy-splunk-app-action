@@ -19,7 +19,7 @@ jobs:
             shell: bash
             run: |
               tags="${{ inputs.tags }}"
-              matrix=$(echo "$tags" | jq -R 'split(",")')
+              matrix=$(echo "$tags" | jq -cR 'split(",")')
               echo "matrix-tags=$matrix" >> $GITHUB_OUTPUT
 
     appinspect:
