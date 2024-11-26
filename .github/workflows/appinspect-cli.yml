@@ -5,7 +5,7 @@ on:
         required: true
         type: string
     secrets:
-      GITHUB_TOKEN:
+      token:
         required: true
 jobs:
     convert-tags:
@@ -49,5 +49,5 @@ jobs:
           with:
             json_file: "appinspect_result_${{ matrix.tags }}.json"
             tag: "${{ matrix.tags }}"
-            github_token: ${{ secrets.GITHUB_TOKEN }}
+            github_token: ${{ secrets.token }}
             include_not_applicable: False
