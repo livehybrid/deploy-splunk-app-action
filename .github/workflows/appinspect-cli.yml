@@ -5,7 +5,7 @@ on:
         required: true
         type: string
     secrets:
-      token:
+      GITHUB_TOKEN:
         required: true
 jobs:
     convert-tags:
