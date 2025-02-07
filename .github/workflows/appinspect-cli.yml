@@ -36,7 +36,7 @@ jobs:
             name: dist
             path: dist/
         - name: scan
-          uses: splunk/appinspect-cli-action@v2.8.1
+          uses: splunk/appinspect-cli-action@v2.9.0
           with:
             app_path: dist/
             included_tags: ${{ matrix.tags }}
