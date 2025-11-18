@@ -54,7 +54,7 @@ runs:
           ucc-gen package -o dist --path output/app
 
       - name: Upload Package Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: dist
           path: dist/
