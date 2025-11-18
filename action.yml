@@ -57,5 +57,5 @@ runs:
         uses: actions/upload-artifact@v5
         with:
           name: dist
-          path: dist/
+          path: dist/*
 
