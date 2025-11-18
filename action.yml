@@ -12,10 +12,10 @@ runs:
   using: "composite"
   steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ inputs.python-version }}
           cache: pip
@@ -42,7 +42,7 @@ runs:
           echo "VERSION_WITH_HASH=${VERSION_WITH_HASH}" >> $GITHUB_OUTPUT
 
       - name: Generate app with ucc-gen
-        uses: splunk/addonfactory-ucc-generator-action@v2.0.1
+        uses: splunk/addonfactory-ucc-generator-action@v3.0.0
         with:
           version: ${{ steps.version.VERSION_WITH_HASH }}
 
@@ -54,7 +54,7 @@ runs:
           ucc-gen package -o dist --path output/app
 
       - name: Upload Package Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: dist
           path: dist/
