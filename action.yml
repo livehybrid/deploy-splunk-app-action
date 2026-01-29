@@ -44,7 +44,7 @@ runs:
       - name: Generate app with ucc-gen
         uses: splunk/addonfactory-ucc-generator-action@v3.0.0
         with:
-          version: ${{ steps.version.VERSION_WITH_HASH }}
+          version: ${{ steps.version.outputs.VERSION_WITH_HASH }}
 
       - name: Generate Package tarball
         shell: bash
