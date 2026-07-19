@@ -36,7 +36,10 @@ jobs:
             name: dist
             path: dist/
         - name: scan
-          uses: splunk/appinspect-cli-action@v2.13.0
+          # Forked action: builds on python:3.12 so the well-formed Python
+          # check parses modern vendored libs. Upstream pins a python:3.7.10
+          # image that SyntaxErrors on them. See livehybrid/appinspect-cli-action.
+          uses: livehybrid/appinspect-cli-action@bump-python-3.12
           with:
             app_path: dist/
             included_tags: ${{ matrix.tags }}
