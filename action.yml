@@ -12,7 +12,7 @@ runs:
   using: "composite"
   steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -54,7 +54,7 @@ runs:
           ucc-gen package -o dist --path output/app
 
       - name: Upload Package Artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/*
