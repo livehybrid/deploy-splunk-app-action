@@ -24,7 +24,7 @@ jobs:
           excluded_tags: offensive
 
       - name: Upload Reports
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: AppInspect_response.html
           path: AppInspect_response.html
