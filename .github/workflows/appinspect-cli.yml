@@ -30,7 +30,7 @@ jobs:
         matrix:
           tags: ${{ fromJson(needs.convert-tags.outputs.matrix-tags) }}
       steps:
-        - uses: actions/checkout@v6
+        - uses: actions/checkout@v7
         - uses: actions/download-artifact@v8
           with:
             name: dist
