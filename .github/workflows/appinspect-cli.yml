@@ -39,7 +39,12 @@ jobs:
           # Forked action: builds on python:3.12 so the well-formed Python
           # check parses modern vendored libs. Upstream pins a python:3.7.10
           # image that SyntaxErrors on them. See livehybrid/appinspect-cli-action.
-          uses: livehybrid/appinspect-cli-action@v2.13.0-py312
+          #
+          # 2.13.1 fixes a regex that raised re.error on 3.11+, which made the
+          # whole .appinspect.expect.yaml waiver mechanism inert on this fork:
+          # any repo with a legitimate documented waiver failed anyway, with a
+          # traceback that said nothing about the app.
+          uses: livehybrid/appinspect-cli-action@v2.13.1-py312
           with:
             app_path: dist/
             included_tags: ${{ matrix.tags }}
