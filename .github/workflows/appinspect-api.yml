@@ -13,6 +13,15 @@ jobs:
     if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
+      # Must come BEFORE download-artifact, so the artifact is not disturbed.
+      #
+      # Without a checkout the runner workspace holds only dist/, so the repo's
+      # .appinspect_api.expect.yaml is never present and the action fails with
+      # "File .appinspect_api.expect.yaml not found" the moment the API reports
+      # any failure. That made the API-side waiver mechanism impossible for every
+      # consumer of this workflow: a repo could waive a finding for the CLI legs
+      # and still have this job go red on a file it had actually committed.
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
         with:
           name: dist
