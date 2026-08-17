@@ -9,6 +9,9 @@ name: Deploy to SCDE
 #     website  = bare stack hostname, e.g. scde-abc123.splunkcloud.com
 #     username = stack admin user
 #     password = stack admin password
+#   login item `splunkbase-credentials`: splunk.com username/password — used by
+#   `acs login` against admin.splunk.com (the stack's 8089 mgmt port is
+#   firewalled from the internet, so stack session-key auth cannot work here).
 #   ACS stack name is derived by stripping .splunkcloud.com from the hostname.
 
 on:
@@ -74,14 +77,24 @@ jobs:
             echo "Website entries: $(echo "$item" | jq -r '.urls | length')"
             exit 1
           fi
+          sb=$(op item get "splunkbase-credentials" --vault "${{ inputs.vault }}" --format json)
+          sb_user=$(echo "$sb" | jq -r '[.fields[] | select(.id=="username" or .purpose=="USERNAME") | .value][0] // empty')
+          sb_pass=$(echo "$sb" | jq -r '[.fields[] | select(.id=="password" or .purpose=="PASSWORD") | .value][0] // empty')
+          if [ -z "$sb_user" ] || [ -z "$sb_pass" ]; then
+            echo "::error::1Password item 'splunkbase-credentials' (vault '${{ inputs.vault }}') needs username + password (splunk.com account for acs login)"
+            exit 1
+          fi
           # op-loaded values are NOT auto-masked (unlike secrets.*) — mask before
           # persisting, or later steps print resolved env blocks in clear text.
           echo "::add-mask::$pass"
+          echo "::add-mask::$sb_pass"
           {
             echo "SPLUNKCLOUD_STACK_URL=$url"
             echo "SPLUNKCLOUD_ADMIN_USER=$user"
             echo "SPLUNKCLOUD_ADMIN_PASSWORD=$pass"
             echo "ACS_STACK=${url%.splunkcloud.com}"
+            echo "SPLUNK_USERNAME=$sb_user"
+            echo "SPLUNK_PASSWORD=$sb_pass"
           } >> "$GITHUB_ENV"
 
       - name: Install ACS CLI
@@ -101,19 +114,11 @@ jobs:
             echo "::error::no .tar.gz found in artifact '${{ inputs.artifact }}'"
             exit 1
           fi
-          # Stack session key auth (mirrors the proven scdeploy flow).
-          STACK_TOKEN=$(curl -k -sSf -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}" \
-            "https://${SPLUNKCLOUD_STACK_URL}:8089/services/auth/login" \
-            -d "username=${SPLUNKCLOUD_ADMIN_USER}&password=${SPLUNKCLOUD_ADMIN_PASSWORD}" \
-            | grep -oP '(?<=<sessionKey>)[^<]+')
-          if [ -z "$STACK_TOKEN" ]; then
-            echo "::error::could not obtain a session key from ${SPLUNKCLOUD_STACK_URL}:8089 — stack still starting, wrong creds, or mgmt port not reachable"
-            exit 1
-          fi
-          echo "::add-mask::${STACK_TOKEN}"
-          export STACK_TOKEN
+          # splunk.com auth against admin.splunk.com (SPLUNK_USERNAME/SPLUNK_PASSWORD
+          # from the env). The stack's 8089 mgmt port is firewalled from GitHub
+          # runners, so stack session-key auth is NOT an option here.
           acs config add-stack "$ACS_STACK" || echo "stack already configured"
           acs config use-stack "$ACS_STACK"
-          acs login --token-user "$SPLUNKCLOUD_ADMIN_USER"
+          acs login
           acs status current-stack
           acs apps bulk-install private --package-src-dir acs-pkgs/ --acs-legal-ack=Y
