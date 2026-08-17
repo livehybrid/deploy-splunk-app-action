@@ -264,18 +264,26 @@ jobs:
           if acs apps bulk-install private --package-src-dir acs-pkgs/ --acs-legal-ack=Y; then
             acs_ok=1
           else
-            echo "acs CLI install failed — trying raw ACS POST with dual auth headers"
+            echo "acs CLI install failed — trying raw ACS POST header permutations"
             raw_fail=0
             for pkg in acs-pkgs/*.tar.gz; do
-              code=$(curl -sS -o /tmp/acs_raw.json -w '%{http_code}' --max-time 900 -X POST \
-                -H "Authorization: Bearer ${STACK_TOKEN}" \
-                -H "X-Splunk-Authorization: ${STACK_TOKEN}" \
-                -H 'ACS-Legal-Ack: Y' \
-                --data-binary @"$pkg" \
-                "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/apps/victoria?splunkbase=false")
-              echo "raw ACS install $(basename "$pkg"): HTTP $code"
-              head -c 600 /tmp/acs_raw.json 2>/dev/null; echo
-              case "$code" in 200|201|202) ;; *) raw_fail=1;; esac
+              ok=0
+              for combo in "stack/stack" "cp/stack"; do
+                case "$combo" in
+                  stack/stack) A="$STACK_TOKEN"; X="$STACK_TOKEN";;
+                  cp/stack)    A="${ACS_CP_TOKEN:-$STACK_TOKEN}"; X="$STACK_TOKEN";;
+                esac
+                code=$(curl -sS -o /tmp/acs_raw.json -w '%{http_code}' --max-time 900 -X POST \
+                  -H "Authorization: Bearer ${A}" \
+                  -H "X-Splunk-Authorization: ${X}" \
+                  -H 'ACS-Legal-Ack: Y' \
+                  --data-binary @"$pkg" \
+                  "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/apps/victoria?splunkbase=false")
+                echo "raw ACS install [$combo] $(basename "$pkg"): HTTP $code"
+                head -c 400 /tmp/acs_raw.json 2>/dev/null; echo
+                case "$code" in 200|201|202) ok=1; break;; esac
+              done
+              [ "$ok" -eq 1 ] || raw_fail=1
             done
             [ "$raw_fail" -eq 0 ] && acs_ok=1
           fi
@@ -312,6 +320,11 @@ jobs:
               echo "::error::no csrf cookie after web login"
               exit 1
             fi
+            COOKIES_PROBE=$(awk 'NR>4 && $6!="" {printf "%s=%s; ", $6, $7}' "$CJ")
+            for path in "/en-US/app/launcher/home" "/en-US/manager/appinstall"; do
+              pcode=$(curl -k -sS -o /dev/null -w '%{http_code}' -H "Cookie: ${COOKIES_PROBE%; }" "$UI$path")
+              echo "authenticated GET $path: HTTP $pcode"
+            done
             # Login sets cookies under Path=/en-US/account, so a jar-based -b
             # would omit the session cookie on /en-US/manager URLs. Send every
             # cookie explicitly instead.
