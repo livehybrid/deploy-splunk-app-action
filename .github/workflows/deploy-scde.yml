@@ -1,0 +1,108 @@
+name: Deploy to SCDE
+
+# Reusable: installs the packaged app artifact onto the Splunk Cloud Developer
+# Edition stack via ACS. Credentials come from 1Password at runtime — the only
+# GitHub secret a consumer needs is OP_SERVICE_ACCOUNT_TOKEN.
+#
+# 1Password schema (same as splunk_app_scdeploy):
+#   vault `cicd`, login item `splunk-cloud-stack`:
+#     website  = bare stack hostname, e.g. scde-abc123.splunkcloud.com
+#     username = stack admin user
+#     password = stack admin password
+#   ACS stack name is derived by stripping .splunkcloud.com from the hostname.
+
+on:
+  workflow_call:
+    inputs:
+      artifact:
+        description: Artifact name holding the packaged app tarball(s)
+        type: string
+        default: dist
+      vault:
+        description: 1Password vault holding the stack item
+        type: string
+        default: cicd
+      stack_item:
+        description: 1Password login item with stack url/username/password
+        type: string
+        default: splunk-cloud-stack
+    secrets:
+      op_service_account_token:
+        required: true
+
+jobs:
+  deploy-scde:
+    # Dependabot actors get no secrets, so this job could only fail for them.
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact }}
+          path: dist/
+
+      - name: Install 1Password CLI
+        run: |
+          curl -sSfLo op.zip https://cache.agilebits.com/dist/1P/op2/pkg/v2.24.0/op_linux_amd64_v2.24.0.zip
+          sudo unzip -od /usr/local/bin/ op.zip
+          rm op.zip
+          sudo chmod +x /usr/local/bin/op
+          op --version
+
+      - name: Load stack credentials from 1Password
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.op_service_account_token }}
+        run: |
+          item=$(op item get "${{ inputs.stack_item }}" --vault "${{ inputs.vault }}" --format json)
+          user=$(echo "$item" | jq -r '[.fields[] | select(.id=="username" or .purpose=="USERNAME") | .value][0] // empty')
+          pass=$(echo "$item" | jq -r '[.fields[] | select(.id=="password" or .purpose=="PASSWORD") | .value][0] // empty')
+          url=$(echo "$item"  | jq -r '.urls[0].href // empty')
+          # Normalise to a bare hostname whatever shape the item stores.
+          url=${url#https://}; url=${url#http://}; url=${url%%/*}
+          if [ -z "$user" ] || [ -z "$pass" ] || [ -z "$url" ]; then
+            echo "::error::1Password item '${{ inputs.stack_item }}' incomplete — need username, password and website url"
+            exit 1
+          fi
+          # op-loaded values are NOT auto-masked (unlike secrets.*) — mask before
+          # persisting, or later steps print resolved env blocks in clear text.
+          echo "::add-mask::$pass"
+          {
+            echo "SPLUNKCLOUD_STACK_URL=$url"
+            echo "SPLUNKCLOUD_ADMIN_USER=$user"
+            echo "SPLUNKCLOUD_ADMIN_PASSWORD=$pass"
+            echo "ACS_STACK=${url%.splunkcloud.com}"
+          } >> "$GITHUB_ENV"
+
+      - name: Install ACS CLI
+        run: |
+          ACS_VERSION="v2.23.0"
+          curl -sSfLo /tmp/acs.tgz "https://github.com/splunk/acs-cli/releases/download/${ACS_VERSION}/acs_${ACS_VERSION}_linux_amd64.tar.gz"
+          tar -xzf /tmp/acs.tgz -C /tmp
+          sudo install -m 0755 "$(find /tmp -maxdepth 2 -name acs -type f | head -1)" /usr/local/bin/acs
+          acs version || acs --version
+
+      - name: Install app package(s) via ACS
+        run: |
+          mkdir -p acs-pkgs
+          find dist -name '*.tar.gz' -exec cp {} acs-pkgs/ \;
+          count=$(find acs-pkgs -name '*.tar.gz' | wc -l)
+          if [ "$count" -eq 0 ]; then
+            echo "::error::no .tar.gz found in artifact '${{ inputs.artifact }}'"
+            exit 1
+          fi
+          # Stack session key auth (mirrors the proven scdeploy flow).
+          STACK_TOKEN=$(curl -k -sSf -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}" \
+            "https://${SPLUNKCLOUD_STACK_URL}:8089/services/auth/login" \
+            -d "username=${SPLUNKCLOUD_ADMIN_USER}&password=${SPLUNKCLOUD_ADMIN_PASSWORD}" \
+            | grep -oP '(?<=<sessionKey>)[^<]+')
+          if [ -z "$STACK_TOKEN" ]; then
+            echo "::error::could not obtain a session key from ${SPLUNKCLOUD_STACK_URL}:8089 — stack still starting, wrong creds, or mgmt port not reachable"
+            exit 1
+          fi
+          echo "::add-mask::${STACK_TOKEN}"
+          export STACK_TOKEN
+          acs config add-stack "$ACS_STACK" || echo "stack already configured"
+          acs config use-stack "$ACS_STACK"
+          acs login --token-user "$SPLUNKCLOUD_ADMIN_USER"
+          acs status current-stack
+          acs apps bulk-install private --package-src-dir acs-pkgs/ --acs-legal-ack=Y
