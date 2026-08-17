@@ -300,21 +300,32 @@ jobs:
               --data-urlencode "set_has_logged_in=false" \
               "$UI/en-US/account/login")
             echo "web login: HTTP $lcode"
+            echo "cookies now present (names only): $(awk 'NR>4 {print $6}' "$CJ" | tr '\n' ' ')"
+            # The real success signal is a splunkd session cookie, not the HTTP code.
+            if ! awk '{print $6}' "$CJ" | grep -qE '^(splunkd_|session_id)'; then
+              echo "::error::web login did not produce a splunkd session cookie — login failed"
+              head -c 600 /tmp/weblogin.out; echo
+              exit 1
+            fi
             csrf=$(awk '$6 ~ /csrf/ {print $7}' "$CJ" | tail -1)
             if [ -z "$csrf" ]; then
-              echo "::error::no csrf cookie after web login (SSO-only stack?)"
-              head -c 400 /tmp/weblogin.out; echo
+              echo "::error::no csrf cookie after web login"
               exit 1
             fi
             for pkg in acs-pkgs/*.tar.gz; do
-              ucode=$(curl -k -sS -b "$CJ" -o /tmp/webupload.out -w '%{http_code}' -X POST \
+              ucode=$(curl -k -sS -b "$CJ" -D /tmp/webupload.hdr -o /tmp/webupload.out -w '%{http_code}' -X POST \
                 -H "X-Splunk-Form-Key: ${csrf}" \
                 -H "Referer: $UI/en-US/manager/appinstall" \
                 -F "appfile=@${pkg}" -F "force=1" \
                 "$UI/en-US/manager/appinstall/_upload")
-              echo "web upload $(basename "$pkg"): HTTP $ucode"
+              loc=$(grep -i '^location:' /tmp/webupload.hdr | tr -d '\r' | head -1)
+              echo "web upload $(basename "$pkg"): HTTP $ucode ${loc}"
               case "$ucode" in
-                200|201|202|303) ;;
+                200|201|202|303)
+                  case "$loc" in
+                    *login*) echo "::error::upload redirected to login — session not accepted"; exit 1;;
+                  esac
+                  ;;
                 *) echo "::error::web upload failed"; head -c 600 /tmp/webupload.out; echo; exit 1;;
               esac
             done
@@ -322,10 +333,17 @@ jobs:
           # 3) Verify the app is actually installed (mgmt window still open).
           if [ "${MGMT_OPEN:-0}" = "1" ]; then
             for pkg in acs-pkgs/*.tar.gz; do
-              app=$(tar -tzf "$pkg" | head -1 | cut -d/ -f1)
-              vjson=$(curl -k -sS -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}" \
-                "https://${SPLUNKCLOUD_STACK_URL}:8089/services/apps/local/${app}?output_mode=json" || true)
-              ver=$(echo "$vjson" | jq -r '.entry[0].content.version // empty' 2>/dev/null)
+              app=$(tar -tzf "$pkg" 2>/dev/null | head -1 | cut -d/ -f1)
+              ver=""
+              # Install lands asynchronously after upload — poll up to 2 min.
+              for i in $(seq 1 12); do
+                vjson=$(curl -k -sS -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}" \
+                  "https://${SPLUNKCLOUD_STACK_URL}:8089/services/apps/local/${app}?output_mode=json" || true)
+                ver=$(echo "$vjson" | jq -r '.entry[0].content.version // empty' 2>/dev/null)
+                [ -n "$ver" ] && break
+                echo "waiting for ${app} to appear ($i/12)..."
+                sleep 10
+              done
               if [ -n "$ver" ]; then
                 echo "VERIFIED: ${app} ${ver} installed on ${ACS_STACK}"
               else
