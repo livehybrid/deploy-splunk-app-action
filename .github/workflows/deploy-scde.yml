@@ -16,8 +16,10 @@ name: Deploy to SCDE
 #   - On SCDE, JWTs minted via the ACS tokens endpoint pass control-plane calls
 #     (login/status/vetting) but the INSTALL step fails on-stack with "Failed to
 #     decrypt the token" (Splunk-side bug, reproduced on a fresh stack; same as
-#     the scdeploy nightly blocker). A token minted ON the stack always
-#     decrypts, so a `token` field on the item is preferred when present.
+#     the scdeploy nightly blocker). Tokens minted ON the stack always decrypt.
+#   - Token preference order: 1P `token` field > on-stack mint (runner IP is
+#     ACS-allowlisted for search-api just for the run, then removed) > ACS mint
+#     (last resort; known-broken for install on SCDE).
 #   ACS stack name is derived by stripping .splunkcloud.com from the hostname.
 
 on:
@@ -108,6 +110,53 @@ jobs:
           sudo install -m 0755 "$(find /tmp -maxdepth 2 -name acs -type f | head -1)" /usr/local/bin/acs
           acs version || acs --version
 
+      - name: Open stack mgmt (8089) to this runner via ACS ip-allowlist
+        run: |
+          if [ -n "${STACK_TOKEN_PRESET:-}" ]; then
+            echo "Pre-made stack token present — no need to reach 8089"
+            exit 0
+          fi
+          # Control-plane token (works for allowlist ops even where install decrypt fails).
+          TOK_RESP=$(curl -sS -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}" \
+            -X POST "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/tokens" \
+            -H 'Content-Type: application/json' \
+            -d "{\"user\":\"${SPLUNKCLOUD_ADMIN_USER}\",\"audience\":\"deploy-scde-cp\",\"type\":\"ephemeral\",\"expiresOn\":\"+1h\"}")
+          CP_TOKEN=$(echo "$TOK_RESP" | jq -r '.token // empty')
+          if [ -z "$CP_TOKEN" ]; then
+            echo "::warning::could not mint an ACS control-plane token — skipping allowlist, will fall back to ACS-minted install token"
+            exit 0
+          fi
+          echo "::add-mask::${CP_TOKEN}"
+          echo "ACS_CP_TOKEN=${CP_TOKEN}" >> "$GITHUB_ENV"
+          RUNNER_IP=$(curl -sSf https://api.ipify.org)
+          echo "Runner egress IP: ${RUNNER_IP}"
+          code=$(curl -sS -o /tmp/allow.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${CP_TOKEN}" -H 'Content-Type: application/json' \
+            -d "{\"subnets\":[\"${RUNNER_IP}/32\"]}" \
+            "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/access-control/ip-allowlist/search-api")
+          echo "allowlist add: HTTP $code"; head -c 800 /tmp/allow.json 2>/dev/null; echo
+          case "$code" in
+            200|201|202|409) ;;   # 409 = already present
+            *) echo "::warning::allowlist add failed — will fall back to ACS-minted install token"; exit 0;;
+          esac
+          {
+            echo "RUNNER_IP=${RUNNER_IP}"
+            echo "ALLOWLIST_ADDED=1"
+          } >> "$GITHUB_ENV"
+          # Propagation can take minutes — poll 8089 (bounded ~12 min).
+          tries=0
+          until curl -k -sS -m 5 -o /dev/null "https://${SPLUNKCLOUD_STACK_URL}:8089/services/server/info"; do
+            tries=$((tries+1))
+            if [ "$tries" -ge 36 ]; then
+              echo "::warning::8089 still unreachable after allowlisting — will fall back to ACS-minted install token"
+              exit 0
+            fi
+            echo "waiting for allowlist to propagate ($tries/36)..."
+            sleep 20
+          done
+          echo "MGMT_OPEN=1" >> "$GITHUB_ENV"
+          echo "8089 reachable from runner"
+
       - name: Install app package(s) via ACS
         run: |
           mkdir -p acs-pkgs
@@ -118,7 +167,29 @@ jobs:
             exit 1
           fi
           if [ -n "${STACK_TOKEN_PRESET:-}" ]; then
+            echo "Token source: 1Password item"
             STACK_TOKEN="$STACK_TOKEN_PRESET"
+          elif [ "${MGMT_OPEN:-0}" = "1" ]; then
+            # Mint the JWT ON the stack (these always decrypt there). Falls back
+            # to a splunkd session key if token auth is disabled on the stack.
+            resp=$(curl -k -sS -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}" \
+              -X POST "https://${SPLUNKCLOUD_STACK_URL}:8089/services/authorization/tokens?output_mode=json" \
+              -d "name=${SPLUNKCLOUD_ADMIN_USER}" -d "audience=deploy-scde" -d "expires_on=+4h" || true)
+            STACK_TOKEN=$(echo "$resp" | jq -r '.entry[0].content.token // empty' 2>/dev/null)
+            if [ -n "$STACK_TOKEN" ]; then
+              echo "Token source: minted on-stack via /services/authorization/tokens"
+            else
+              echo "on-stack JWT mint failed (token auth disabled?) — using a session key"
+              STACK_TOKEN=$(curl -k -sSf -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}" \
+                "https://${SPLUNKCLOUD_STACK_URL}:8089/services/auth/login" \
+                -d "username=${SPLUNKCLOUD_ADMIN_USER}&password=${SPLUNKCLOUD_ADMIN_PASSWORD}" \
+                | grep -oP '(?<=<sessionKey>)[^<]+')
+              [ -n "$STACK_TOKEN" ] && echo "Token source: stack session key"
+            fi
+            if [ -z "$STACK_TOKEN" ]; then
+              echo "::error::8089 was reachable but no token could be minted on-stack"
+              exit 1
+            fi
           else
             # Mint a stack JWT via the ACS tokens endpoint (admin.splunk.com is
             # public). NOTE: on SCDE these tokens currently fail the install step
@@ -167,3 +238,17 @@ jobs:
             echo "install attempt $tries failed — retrying in 30s"
             sleep 30
           done
+
+
+      - name: Remove runner IP from stack allowlist
+        if: always()
+        run: |
+          if [ "${ALLOWLIST_ADDED:-0}" != "1" ] || [ -z "${ACS_CP_TOKEN:-}" ]; then
+            echo "nothing to clean up"
+            exit 0
+          fi
+          code=$(curl -sS -o /tmp/deallow.json -w '%{http_code}' -X DELETE \
+            -H "Authorization: Bearer ${ACS_CP_TOKEN}" -H 'Content-Type: application/json' \
+            -d "{\"subnets\":[\"${RUNNER_IP}/32\"]}" \
+            "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/access-control/ip-allowlist/search-api")
+          echo "allowlist remove: HTTP $code"; head -c 400 /tmp/deallow.json 2>/dev/null; echo
