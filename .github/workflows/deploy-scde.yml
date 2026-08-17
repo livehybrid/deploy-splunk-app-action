@@ -117,7 +117,7 @@ jobs:
 
       - name: Install ACS CLI
         run: |
-          ACS_VERSION="v2.23.0"
+          ACS_VERSION="v2.25.0"
           curl -sSfLo /tmp/acs.tgz "https://github.com/splunk/acs-cli/releases/download/${ACS_VERSION}/acs_${ACS_VERSION}_linux_amd64.tar.gz"
           tar -xzf /tmp/acs.tgz -C /tmp
           sudo install -m 0755 "$(find /tmp -maxdepth 2 -name acs -type f | head -1)" /usr/local/bin/acs
