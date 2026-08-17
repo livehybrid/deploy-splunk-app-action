@@ -87,14 +87,27 @@ jobs:
           fi
           # Optional pre-made stack token (see header) — preferred when present.
           preset=$(echo "$item" | jq -r '[.fields[] | select((.label // .id // "") | ascii_downcase == "token") | .value][0] // empty')
+          # splunk.com creds: the acs CLI reads SPLUNK_USERNAME/SPLUNK_PASSWORD
+          # for the AppInspect vetting submission inside `apps bulk-install` —
+          # without them it prompts interactively and dies on EOF.
+          sb=$(op item get "splunkbase-credentials" --vault "${{ inputs.vault }}" --format json)
+          sb_user=$(echo "$sb" | jq -r '[.fields[] | select(.id=="username" or .purpose=="USERNAME") | .value][0] // empty')
+          sb_pass=$(echo "$sb" | jq -r '[.fields[] | select(.id=="password" or .purpose=="PASSWORD") | .value][0] // empty')
+          if [ -z "$sb_user" ] || [ -z "$sb_pass" ]; then
+            echo "::error::1Password item 'splunkbase-credentials' (vault '${{ inputs.vault }}') needs username + password (splunk.com account, used for app vetting)"
+            exit 1
+          fi
           # op-loaded values are NOT auto-masked (unlike secrets.*) — mask before
           # persisting, or later steps print resolved env blocks in clear text.
           echo "::add-mask::$pass"
+          echo "::add-mask::$sb_pass"
           {
             echo "SPLUNKCLOUD_STACK_URL=$url"
             echo "SPLUNKCLOUD_ADMIN_USER=$user"
             echo "SPLUNKCLOUD_ADMIN_PASSWORD=$pass"
             echo "ACS_STACK=${url%.splunkcloud.com}"
+            echo "SPLUNK_USERNAME=$sb_user"
+            echo "SPLUNK_PASSWORD=$sb_pass"
           } >> "$GITHUB_ENV"
           if [ -n "$preset" ]; then
             echo "::add-mask::$preset"
