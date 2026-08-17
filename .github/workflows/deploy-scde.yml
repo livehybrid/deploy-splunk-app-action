@@ -119,6 +119,6 @@ jobs:
           # runners, so stack session-key auth is NOT an option here.
           acs config add-stack "$ACS_STACK" || echo "stack already configured"
           acs config use-stack "$ACS_STACK"
-          acs login
+          acs login --token-user "$SPLUNKCLOUD_ADMIN_USER"
           acs status current-stack
           acs apps bulk-install private --package-src-dir acs-pkgs/ --acs-legal-ack=Y
