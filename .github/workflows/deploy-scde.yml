@@ -276,39 +276,26 @@ jobs:
               exit 1
             fi
             echo "::add-mask::${API_TOKEN}"
-            # Diagnostic permutations: identify WHICH header ACS decrypts and
-            # whether the AppInspect-token identity must match the stack admin.
-            jwt_hdr() { python3 -c 'import base64,sys;s=sys.argv[1].split(".")[0];print(base64.urlsafe_b64decode(s+"="*(-len(s)%4)).decode())' "$1" 2>/dev/null || echo "(not a JWT)"; }
-            echo "stack JWT alg/kid:  $(jwt_hdr "$STACK_TOKEN")"
-            echo "acs CP JWT alg/kid: $(jwt_hdr "${ACS_CP_TOKEN:-none}")"
-            echo "api token alg/kid:  $(jwt_hdr "$API_TOKEN")"
-            API_TOKEN2=$(curl -sS -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}" \
-              "https://api.splunk.com/2.0/rest/login/splunk" | jq -r '.data.token // empty')
-            if [ -n "$API_TOKEN2" ]; then
-              echo "::add-mask::${API_TOKEN2}"
-              echo "api token minted under stack-admin identity: yes ($(jwt_hdr "$API_TOKEN2"))"
-            else
-              echo "api token under stack-admin identity: mint failed (password differs from splunk.com)"
-            fi
-            raw_fail=1
+            # Documented contract (help.splunk.com, ACS manual 10.5.2605):
+            #   Authorization: Bearer <stack JWT>, X-Splunk-Authorization:
+            #   <AppInspect token>, ACS-Legal-Ack: Y. Currently rejected with
+            #   400 "Failed to decrypt the token" — forensics (2026-08-17, runs
+            #   15-17) show the error fires on the BEARER (garbage in the X
+            #   header yields the identical error) and our Splunk 10 stack only
+            #   mints ver:v2 HS512 tokens, which the install backend appears
+            #   unable to decrypt. Splunk support case has the evidence pack.
+            #   This path self-heals once Splunk accept v2 tokens.
+            raw_fail=0
             for pkg in acs-pkgs/*.tar.gz; do
-              for combo in api-livehybrid garbage-x api-stackadmin; do
-                case "$combo" in
-                  api-livehybrid) X="$API_TOKEN";;
-                  garbage-x)      X="not-a-real-token";;
-                  api-stackadmin) [ -z "$API_TOKEN2" ] && continue; X="$API_TOKEN2";;
-                esac
-                code=$(curl -sS -D /tmp/acs_raw.hdr -o /tmp/acs_raw.json -w '%{http_code}' --max-time 900 -X POST \
-                  -H "Authorization: Bearer ${STACK_TOKEN}" \
-                  -H "X-Splunk-Authorization: ${X}" \
-                  -H 'ACS-Legal-Ack: Y' \
-                  --data-binary @"$pkg" \
-                  "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/apps/victoria?splunkbase=false")
-                reqid=$(grep -i 'request-id' /tmp/acs_raw.hdr | tr -d '\r' | head -1)
-                echo "raw ACS install [$combo] $(basename "$pkg"): HTTP $code ${reqid}"
-                head -c 400 /tmp/acs_raw.json 2>/dev/null; echo
-                case "$code" in 200|201|202) raw_fail=0;; esac
-              done
+              code=$(curl -sS -o /tmp/acs_raw.json -w '%{http_code}' --max-time 900 -X POST \
+                -H "Authorization: Bearer ${STACK_TOKEN}" \
+                -H "X-Splunk-Authorization: ${API_TOKEN}" \
+                -H 'ACS-Legal-Ack: Y' \
+                --data-binary @"$pkg" \
+                "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/apps/victoria?splunkbase=false")
+              echo "raw ACS install $(basename "$pkg"): HTTP $code"
+              head -c 400 /tmp/acs_raw.json 2>/dev/null; echo
+              case "$code" in 200|201|202) ;; *) raw_fail=1;; esac
             done
             [ "$raw_fail" -eq 0 ] && acs_ok=1
           fi
