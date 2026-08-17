@@ -56,11 +56,22 @@ jobs:
           item=$(op item get "${{ inputs.stack_item }}" --vault "${{ inputs.vault }}" --format json)
           user=$(echo "$item" | jq -r '[.fields[] | select(.id=="username" or .purpose=="USERNAME") | .value][0] // empty')
           pass=$(echo "$item" | jq -r '[.fields[] | select(.id=="password" or .purpose=="PASSWORD") | .value][0] // empty')
+          # Website slot first; fall back to any field labelled like a url/hostname/stack.
           url=$(echo "$item"  | jq -r '.urls[0].href // empty')
+          if [ -z "$url" ]; then
+            url=$(echo "$item" | jq -r '[.fields[] | select((.label // .id // "") | test("^(url|website|hostname|stack(_?url)?)$"; "i")) | .value][0] // empty')
+          fi
           # Normalise to a bare hostname whatever shape the item stores.
           url=${url#https://}; url=${url#http://}; url=${url%%/*}
           if [ -z "$user" ] || [ -z "$pass" ] || [ -z "$url" ]; then
-            echo "::error::1Password item '${{ inputs.stack_item }}' incomplete — need username, password and website url"
+            missing=""
+            [ -z "$user" ] && missing="$missing username"
+            [ -z "$pass" ] && missing="$missing password"
+            [ -z "$url" ]  && missing="$missing website-url"
+            echo "::error::1Password item '${{ inputs.stack_item }}' (vault '${{ inputs.vault }}') is missing:$missing"
+            echo "Available field labels (values withheld):"
+            echo "$item" | jq -r '.fields[] | "  - id=\(.id // "-") label=\(.label // "-") purpose=\(.purpose // "-") has_value=\(has("value"))"'
+            echo "Website entries: $(echo "$item" | jq -r '.urls | length')"
             exit 1
           fi
           # op-loaded values are NOT auto-masked (unlike secrets.*) — mask before
