@@ -25,6 +25,10 @@ name: Deploy to SCDE
 on:
   workflow_call:
     inputs:
+      force:
+        description: Run even while SCDE deploys are toggled off (retest the ACS fix)
+        type: boolean
+        default: false
       artifact:
         description: Artifact name holding the packaged app tarball(s)
         type: string
@@ -43,8 +47,13 @@ on:
 
 jobs:
   deploy-scde:
+    # TOGGLE: skipped (green check) unless the caller repo sets the repository
+    # variable SCDE_DEPLOY_ENABLED=true, or the run passes force:true. Kept off
+    # while the ACS install token-decrypt bug (Splunk case, 2026-08-17) is open.
+    # Re-enable estate-wide with:
+    #   gh variable set SCDE_DEPLOY_ENABLED --body true -R livehybrid/<repo>
     # Dependabot actors get no secrets, so this job could only fail for them.
-    if: github.actor != 'dependabot[bot]'
+    if: github.actor != 'dependabot[bot]' && (inputs.force || vars.SCDE_DEPLOY_ENABLED == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
