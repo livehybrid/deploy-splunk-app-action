@@ -126,7 +126,7 @@ jobs:
           TOK_RESP=$(curl -sS -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}" \
             -X POST "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/tokens" \
             -H 'Content-Type: application/json' \
-            -d "{\"user\":\"${SPLUNKCLOUD_ADMIN_USER}\",\"audience\":\"deploy-scde\",\"type\":\"ephemeral\",\"expiresOn\":\"+1h\"}")
+            -d "{\"user\":\"${SPLUNKCLOUD_ADMIN_USER}\",\"audience\":\"deploy-scde\",\"type\":\"static\",\"expiresOn\":\"+4h\"}")
           STACK_TOKEN=$(echo "$TOK_RESP" | jq -r '.token // empty')
           if [ -z "$STACK_TOKEN" ]; then
             echo "::error::could not mint a stack token via the ACS tokens endpoint"
@@ -153,4 +153,19 @@ jobs:
             sleep 60
           done
           acs status current-stack
-          acs apps bulk-install private --package-src-dir acs-pkgs/ --acs-legal-ack=Y
+          if ! acs apps bulk-install private --package-src-dir acs-pkgs/ --acs-legal-ack=Y; then
+            # Known Splunk-side failure mode on SCDE: install rejects the stack JWT
+            # with "Failed to decrypt the token" (reproduced on a fresh stack,
+            # 2026-08-17; matches the scdeploy nightly blocker). Fall back to the
+            # raw ACS API with Basic auth, which sidesteps stack-token decryption.
+            echo "acs CLI install failed — falling back to direct ACS API install (Basic auth)"
+            fail=0
+            for pkg in acs-pkgs/*.tar.gz; do
+              echo "Installing $(basename "$pkg") via ACS API..."
+              code=$(curl -sS -o /tmp/acs_install.json -w '%{http_code}' --max-time 900 -X POST                 -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}"                 -H 'ACS-Legal-Ack: Y'                 --data-binary @"$pkg"                 "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/apps/victoria")
+              echo "HTTP $code"
+              cat /tmp/acs_install.json 2>/dev/null | head -c 2000; echo
+              case "$code" in 200|201|202) ;; *) fail=1;; esac
+            done
+            [ "$fail" -eq 0 ] || { echo "::error::direct ACS API install failed too"; exit 1; }
+          fi
