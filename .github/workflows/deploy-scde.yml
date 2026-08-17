@@ -119,6 +119,11 @@ jobs:
           # runners, so stack session-key auth is NOT an option here.
           acs config add-stack "$ACS_STACK" || echo "stack already configured"
           acs config use-stack "$ACS_STACK"
-          acs login --token-user "$SPLUNKCLOUD_ADMIN_USER"
+          # Non-interactive login: acs prompts on stdin for splunk.com user/password.
+          if ! printf '%s\n%s\n' "$SPLUNK_USERNAME" "$SPLUNK_PASSWORD" | acs login --token-user "$SPLUNKCLOUD_ADMIN_USER"; then
+            echo "---- acs login --help (for flag reference) ----"
+            acs login --help || true
+            exit 1
+          fi
           acs status current-stack
           acs apps bulk-install private --package-src-dir acs-pkgs/ --acs-legal-ack=Y
