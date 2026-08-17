@@ -4,14 +4,20 @@ name: Deploy to SCDE
 # Edition stack via ACS. Credentials come from 1Password at runtime — the only
 # GitHub secret a consumer needs is OP_SERVICE_ACCOUNT_TOKEN.
 #
-# 1Password schema (same as splunk_app_scdeploy):
-#   vault `cicd`, login item `splunk-cloud-stack`:
-#     website  = bare stack hostname, e.g. scde-abc123.splunkcloud.com
-#     username = stack admin user
-#     password = stack admin password
-#   login item `splunkbase-credentials`: splunk.com username/password — used by
-#   `acs login` against admin.splunk.com (the stack's 8089 mgmt port is
-#   firewalled from the internet, so stack session-key auth cannot work here).
+# 1Password schema (vault `cicd`, login item `splunk-cloud-stack`):
+#   website  = bare stack hostname, e.g. scde-abc123.splunkcloud.com
+#   username = stack admin user
+#   password = stack admin password
+#   token    = OPTIONAL stack JWT created on the stack UI (Settings > Tokens).
+#
+# Auth notes (learned the hard way, 2026-08-17):
+#   - The stack's own 8089 mgmt port is firewalled from GitHub runners.
+#   - The apps install endpoint is Bearer-only (Basic auth → 401).
+#   - On SCDE, JWTs minted via the ACS tokens endpoint pass control-plane calls
+#     (login/status/vetting) but the INSTALL step fails on-stack with "Failed to
+#     decrypt the token" (Splunk-side bug, reproduced on a fresh stack; same as
+#     the scdeploy nightly blocker). A token minted ON the stack always
+#     decrypts, so a `token` field on the item is preferred when present.
 #   ACS stack name is derived by stripping .splunkcloud.com from the hostname.
 
 on:
@@ -77,25 +83,22 @@ jobs:
             echo "Website entries: $(echo "$item" | jq -r '.urls | length')"
             exit 1
           fi
-          sb=$(op item get "splunkbase-credentials" --vault "${{ inputs.vault }}" --format json)
-          sb_user=$(echo "$sb" | jq -r '[.fields[] | select(.id=="username" or .purpose=="USERNAME") | .value][0] // empty')
-          sb_pass=$(echo "$sb" | jq -r '[.fields[] | select(.id=="password" or .purpose=="PASSWORD") | .value][0] // empty')
-          if [ -z "$sb_user" ] || [ -z "$sb_pass" ]; then
-            echo "::error::1Password item 'splunkbase-credentials' (vault '${{ inputs.vault }}') needs username + password (splunk.com account for acs login)"
-            exit 1
-          fi
+          # Optional pre-made stack token (see header) — preferred when present.
+          preset=$(echo "$item" | jq -r '[.fields[] | select((.label // .id // "") | ascii_downcase == "token") | .value][0] // empty')
           # op-loaded values are NOT auto-masked (unlike secrets.*) — mask before
           # persisting, or later steps print resolved env blocks in clear text.
           echo "::add-mask::$pass"
-          echo "::add-mask::$sb_pass"
           {
             echo "SPLUNKCLOUD_STACK_URL=$url"
             echo "SPLUNKCLOUD_ADMIN_USER=$user"
             echo "SPLUNKCLOUD_ADMIN_PASSWORD=$pass"
             echo "ACS_STACK=${url%.splunkcloud.com}"
-            echo "SPLUNK_USERNAME=$sb_user"
-            echo "SPLUNK_PASSWORD=$sb_pass"
           } >> "$GITHUB_ENV"
+          if [ -n "$preset" ]; then
+            echo "::add-mask::$preset"
+            echo "STACK_TOKEN_PRESET=$preset" >> "$GITHUB_ENV"
+            echo "Using pre-made stack token from the 1Password item"
+          fi
 
       - name: Install ACS CLI
         run: |
@@ -114,27 +117,27 @@ jobs:
             echo "::error::no .tar.gz found in artifact '${{ inputs.artifact }}'"
             exit 1
           fi
-          # splunk.com auth against admin.splunk.com (SPLUNK_USERNAME/SPLUNK_PASSWORD
-          # from the env). The stack's 8089 mgmt port is firewalled from GitHub
-          # runners, so stack session-key auth is NOT an option here.
-          acs config add-stack "$ACS_STACK" || echo "stack already configured"
-          acs config use-stack "$ACS_STACK"
-          # acs login's interactive path reads stack creds from a TTY (no TTY on a
-          # runner) and the stack's 8089 is firewalled, so mint an ephemeral stack
-          # JWT via the ACS tokens endpoint on admin.splunk.com (public), then let
-          # acs login cache it (the STACK_TOKEN env path from acs login --help).
-          TOK_RESP=$(curl -sS -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}" \
-            -X POST "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/tokens" \
-            -H 'Content-Type: application/json' \
-            -d "{\"user\":\"${SPLUNKCLOUD_ADMIN_USER}\",\"audience\":\"deploy-scde\",\"type\":\"static\",\"expiresOn\":\"+4h\"}")
-          STACK_TOKEN=$(echo "$TOK_RESP" | jq -r '.token // empty')
-          if [ -z "$STACK_TOKEN" ]; then
-            echo "::error::could not mint a stack token via the ACS tokens endpoint"
-            echo "$TOK_RESP" | jq 'del(.token)' 2>/dev/null || echo "$TOK_RESP"
-            exit 1
+          if [ -n "${STACK_TOKEN_PRESET:-}" ]; then
+            STACK_TOKEN="$STACK_TOKEN_PRESET"
+          else
+            # Mint a stack JWT via the ACS tokens endpoint (admin.splunk.com is
+            # public). NOTE: on SCDE these tokens currently fail the install step
+            # ("Failed to decrypt the token") — see header; prefer a UI token.
+            TOK_RESP=$(curl -sS -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}" \
+              -X POST "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/tokens" \
+              -H 'Content-Type: application/json' \
+              -d "{\"user\":\"${SPLUNKCLOUD_ADMIN_USER}\",\"audience\":\"deploy-scde\",\"type\":\"static\",\"expiresOn\":\"+4h\"}")
+            STACK_TOKEN=$(echo "$TOK_RESP" | jq -r '.token // empty')
+            if [ -z "$STACK_TOKEN" ]; then
+              echo "::error::could not mint a stack token via the ACS tokens endpoint"
+              echo "$TOK_RESP" | jq 'del(.token)' 2>/dev/null || echo "$TOK_RESP"
+              exit 1
+            fi
           fi
           echo "::add-mask::${STACK_TOKEN}"
           export STACK_TOKEN
+          acs config add-stack "$ACS_STACK" || echo "stack already configured"
+          acs config use-stack "$ACS_STACK"
           # A freshly-provisioned stack can hold a valid token while ACS metadata
           # (stack type/status) is still coming up — retry login for up to 10 min.
           attempt=0
@@ -153,19 +156,14 @@ jobs:
             sleep 60
           done
           acs status current-stack
-          if ! acs apps bulk-install private --package-src-dir acs-pkgs/ --acs-legal-ack=Y; then
-            # Known Splunk-side failure mode on SCDE: install rejects the stack JWT
-            # with "Failed to decrypt the token" (reproduced on a fresh stack,
-            # 2026-08-17; matches the scdeploy nightly blocker). Fall back to the
-            # raw ACS API with Basic auth, which sidesteps stack-token decryption.
-            echo "acs CLI install failed — falling back to direct ACS API install (Basic auth)"
-            fail=0
-            for pkg in acs-pkgs/*.tar.gz; do
-              echo "Installing $(basename "$pkg") via ACS API..."
-              code=$(curl -sS -o /tmp/acs_install.json -w '%{http_code}' --max-time 900 -X POST                 -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}"                 -H 'ACS-Legal-Ack: Y'                 --data-binary @"$pkg"                 "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/apps/victoria")
-              echo "HTTP $code"
-              cat /tmp/acs_install.json 2>/dev/null | head -c 2000; echo
-              case "$code" in 200|201|202) ;; *) fail=1;; esac
-            done
-            [ "$fail" -eq 0 ] || { echo "::error::direct ACS API install failed too"; exit 1; }
-          fi
+          # The vetting submit can 503 transiently — retry the install.
+          tries=0
+          until acs apps bulk-install private --package-src-dir acs-pkgs/ --acs-legal-ack=Y; do
+            tries=$((tries+1))
+            if [ "$tries" -ge 3 ]; then
+              echo "::error::ACS app install failed after $tries attempts. If the error above is 'Failed to decrypt the token', that is the known SCDE issue with ACS-minted JWTs: create a token on the stack UI (Settings > Tokens) and store it as a 'token' field on the '${{ inputs.stack_item }}' item — this workflow uses it automatically."
+              exit 1
+            fi
+            echo "install attempt $tries failed — retrying in 30s"
+            sleep 30
+          done
