@@ -264,26 +264,29 @@ jobs:
           if acs apps bulk-install private --package-src-dir acs-pkgs/ --acs-legal-ack=Y; then
             acs_ok=1
           else
-            echo "acs CLI install failed — trying raw ACS POST header permutations"
+            echo "acs CLI install failed — raw ACS POST with api.splunk.com vetting token in X-Splunk-Authorization"
+            # X-Splunk-Authorization must carry an api.splunk.com (AppInspect
+            # service) token, NOT a stack/ACS JWT — the "Failed to decrypt the
+            # token" error is ACS failing to decrypt a wrong-kind token in THIS
+            # header. Bearer carries the stack JWT as usual.
+            API_TOKEN=$(curl -sS -u "${SPLUNK_USERNAME}:${SPLUNK_PASSWORD}" \
+              "https://api.splunk.com/2.0/rest/login/splunk" | jq -r '.data.token // empty')
+            if [ -z "$API_TOKEN" ]; then
+              echo "::error::could not obtain an api.splunk.com token with SPLUNK_USERNAME/PASSWORD"
+              exit 1
+            fi
+            echo "::add-mask::${API_TOKEN}"
             raw_fail=0
             for pkg in acs-pkgs/*.tar.gz; do
-              ok=0
-              for combo in "stack/stack" "cp/stack"; do
-                case "$combo" in
-                  stack/stack) A="$STACK_TOKEN"; X="$STACK_TOKEN";;
-                  cp/stack)    A="${ACS_CP_TOKEN:-$STACK_TOKEN}"; X="$STACK_TOKEN";;
-                esac
-                code=$(curl -sS -o /tmp/acs_raw.json -w '%{http_code}' --max-time 900 -X POST \
-                  -H "Authorization: Bearer ${A}" \
-                  -H "X-Splunk-Authorization: ${X}" \
-                  -H 'ACS-Legal-Ack: Y' \
-                  --data-binary @"$pkg" \
-                  "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/apps/victoria?splunkbase=false")
-                echo "raw ACS install [$combo] $(basename "$pkg"): HTTP $code"
-                head -c 400 /tmp/acs_raw.json 2>/dev/null; echo
-                case "$code" in 200|201|202) ok=1; break;; esac
-              done
-              [ "$ok" -eq 1 ] || raw_fail=1
+              code=$(curl -sS -o /tmp/acs_raw.json -w '%{http_code}' --max-time 900 -X POST \
+                -H "Authorization: Bearer ${STACK_TOKEN}" \
+                -H "X-Splunk-Authorization: ${API_TOKEN}" \
+                -H 'ACS-Legal-Ack: Y' \
+                --data-binary @"$pkg" \
+                "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/apps/victoria?splunkbase=false")
+              echo "raw ACS install $(basename "$pkg"): HTTP $code"
+              head -c 600 /tmp/acs_raw.json 2>/dev/null; echo
+              case "$code" in 200|201|202) ;; *) raw_fail=1;; esac
             done
             [ "$raw_fail" -eq 0 ] && acs_ok=1
           fi
