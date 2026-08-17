@@ -135,6 +135,22 @@ jobs:
           fi
           echo "::add-mask::${STACK_TOKEN}"
           export STACK_TOKEN
-          acs login --token-user "$SPLUNKCLOUD_ADMIN_USER"
+          # A freshly-provisioned stack can hold a valid token while ACS metadata
+          # (stack type/status) is still coming up — retry login for up to 10 min.
+          attempt=0
+          until acs login --token-user "$SPLUNKCLOUD_ADMIN_USER"; do
+            attempt=$((attempt+1))
+            if [ "$attempt" -ge 10 ]; then
+              echo "::error::acs login still failing after $attempt attempts"
+              echo "---- ACS status probe ----"
+              curl -sS -o /tmp/acs_status.json -w 'HTTP %{http_code}\n' \
+                -H "Authorization: Bearer ${STACK_TOKEN}" \
+                "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/status" || true
+              head -c 2000 /tmp/acs_status.json 2>/dev/null; echo
+              exit 1
+            fi
+            echo "acs login failed (attempt $attempt) — stack may still be provisioning; retrying in 60s"
+            sleep 60
+          done
           acs status current-stack
           acs apps bulk-install private --package-src-dir acs-pkgs/ --acs-legal-ack=Y
