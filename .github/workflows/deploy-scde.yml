@@ -312,8 +312,14 @@ jobs:
               echo "::error::no csrf cookie after web login"
               exit 1
             fi
+            # Login sets cookies under Path=/en-US/account, so a jar-based -b
+            # would omit the session cookie on /en-US/manager URLs. Send every
+            # cookie explicitly instead.
+            COOKIES=$(awk 'NR>4 && $6!="" {printf "%s=%s; ", $6, $7}' "$CJ")
+            COOKIES=${COOKIES%; }
             for pkg in acs-pkgs/*.tar.gz; do
-              ucode=$(curl -k -sS -b "$CJ" -D /tmp/webupload.hdr -o /tmp/webupload.out -w '%{http_code}' -X POST \
+              ucode=$(curl -k -sS -D /tmp/webupload.hdr -o /tmp/webupload.out -w '%{http_code}' -X POST \
+                -H "Cookie: ${COOKIES}" \
                 -H "X-Splunk-Form-Key: ${csrf}" \
                 -H "Referer: $UI/en-US/manager/appinstall" \
                 -F "appfile=@${pkg}" -F "force=1" \
