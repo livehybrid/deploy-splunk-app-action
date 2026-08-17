@@ -173,9 +173,12 @@ jobs:
             exit 1
           fi
           mint_on_stack() {
+            # expires_on rejects relative formats like +4h — use absolute ISO 8601.
+            local exp
+            exp=$(date -u -d '+12 hours' '+%Y-%m-%dT%H:%M:%S+00:00')
             curl -k -sS -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}" \
               -X POST "https://${SPLUNKCLOUD_STACK_URL}:8089/services/authorization/tokens?output_mode=json" \
-              -d "name=${SPLUNKCLOUD_ADMIN_USER}" -d "audience=deploy-scde" -d "expires_on=+4h" || true
+              -d "name=${SPLUNKCLOUD_ADMIN_USER}" -d "audience=deploy-scde" -d "expires_on=${exp}" || true
           }
           if [ -n "${STACK_TOKEN_PRESET:-}" ]; then
             echo "Token source: 1Password item"
