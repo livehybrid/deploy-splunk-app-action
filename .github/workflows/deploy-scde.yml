@@ -256,18 +256,87 @@ jobs:
             sleep 60
           done
           acs status current-stack
-          # The vetting submit can 503 transiently — retry the install.
-          tries=0
-          until acs apps bulk-install private --package-src-dir acs-pkgs/ --acs-legal-ack=Y; do
-            tries=$((tries+1))
-            if [ "$tries" -ge 3 ]; then
-              echo "::error::ACS app install failed after $tries attempts. If the error above is 'Failed to decrypt the token', that is the known SCDE issue with ACS-minted JWTs: create a token on the stack UI (Settings > Tokens) and store it as a 'token' field on the '${{ inputs.stack_item }}' item — this workflow uses it automatically."
+          # 1) acs CLI install. On SCDE/Splunk 10 the install endpoint currently
+          #    rejects EVERY token kind with "Failed to decrypt the token"
+          #    (ACS-minted, stack REST-minted, CLI v2.23-v2.25 — all verified
+          #    2026-08-17; vetting accepts the same token). Splunk-side bug.
+          acs_ok=0
+          if acs apps bulk-install private --package-src-dir acs-pkgs/ --acs-legal-ack=Y; then
+            acs_ok=1
+          else
+            echo "acs CLI install failed — trying raw ACS POST with dual auth headers"
+            raw_fail=0
+            for pkg in acs-pkgs/*.tar.gz; do
+              code=$(curl -sS -o /tmp/acs_raw.json -w '%{http_code}' --max-time 900 -X POST \
+                -H "Authorization: Bearer ${STACK_TOKEN}" \
+                -H "X-Splunk-Authorization: ${STACK_TOKEN}" \
+                -H 'ACS-Legal-Ack: Y' \
+                --data-binary @"$pkg" \
+                "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/apps/victoria?splunkbase=false")
+              echo "raw ACS install $(basename "$pkg"): HTTP $code"
+              head -c 600 /tmp/acs_raw.json 2>/dev/null; echo
+              case "$code" in 200|201|202) ;; *) raw_fail=1;; esac
+            done
+            [ "$raw_fail" -eq 0 ] && acs_ok=1
+          fi
+          # 2) SplunkWeb upload fallback (needs the mgmt window for verification,
+          #    web on 443 is publicly reachable on SCDE). Same authenticated
+          #    upload flow proven on the local .222 Splunk.
+          if [ "$acs_ok" -ne 1 ]; then
+            if [ "${MGMT_OPEN:-0}" != "1" ]; then
+              echo "::error::ACS install failed and no mgmt window for the web-upload fallback"
               exit 1
             fi
-            echo "install attempt $tries failed — retrying in 30s"
-            sleep 30
-          done
-
+            echo "Falling back to SplunkWeb upload on 443"
+            UI="https://${SPLUNKCLOUD_STACK_URL}"
+            CJ=/tmp/cookiejar
+            rm -f "$CJ"
+            curl -k -sS -c "$CJ" -o /dev/null "$UI/en-US/account/login"
+            cval=$(awk '$6=="cval" {print $7}' "$CJ" | tail -1)
+            lcode=$(curl -k -sS -b "$CJ" -c "$CJ" -o /tmp/weblogin.out -w '%{http_code}' \
+              --data-urlencode "username=${SPLUNKCLOUD_ADMIN_USER}" \
+              --data-urlencode "password=${SPLUNKCLOUD_ADMIN_PASSWORD}" \
+              --data-urlencode "cval=${cval}" \
+              --data-urlencode "set_has_logged_in=false" \
+              "$UI/en-US/account/login")
+            echo "web login: HTTP $lcode"
+            csrf=$(awk '$6 ~ /csrf/ {print $7}' "$CJ" | tail -1)
+            if [ -z "$csrf" ]; then
+              echo "::error::no csrf cookie after web login (SSO-only stack?)"
+              head -c 400 /tmp/weblogin.out; echo
+              exit 1
+            fi
+            for pkg in acs-pkgs/*.tar.gz; do
+              ucode=$(curl -k -sS -b "$CJ" -o /tmp/webupload.out -w '%{http_code}' -X POST \
+                -H "X-Splunk-Form-Key: ${csrf}" \
+                -H "Referer: $UI/en-US/manager/appinstall" \
+                -F "appfile=@${pkg}" -F "force=1" \
+                "$UI/en-US/manager/appinstall/_upload")
+              echo "web upload $(basename "$pkg"): HTTP $ucode"
+              case "$ucode" in
+                200|201|202|303) ;;
+                *) echo "::error::web upload failed"; head -c 600 /tmp/webupload.out; echo; exit 1;;
+              esac
+            done
+          fi
+          # 3) Verify the app is actually installed (mgmt window still open).
+          if [ "${MGMT_OPEN:-0}" = "1" ]; then
+            for pkg in acs-pkgs/*.tar.gz; do
+              app=$(tar -tzf "$pkg" | head -1 | cut -d/ -f1)
+              vjson=$(curl -k -sS -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}" \
+                "https://${SPLUNKCLOUD_STACK_URL}:8089/services/apps/local/${app}?output_mode=json" || true)
+              ver=$(echo "$vjson" | jq -r '.entry[0].content.version // empty' 2>/dev/null)
+              if [ -n "$ver" ]; then
+                echo "VERIFIED: ${app} ${ver} installed on ${ACS_STACK}"
+              else
+                echo "::error::${app} not present on the stack after install"
+                echo "$vjson" | head -c 400; echo
+                exit 1
+              fi
+            done
+          else
+            echo "::warning::mgmt window closed — skipping on-stack verification"
+          fi
 
       - name: Remove runner IP from stack allowlist
         if: always()
