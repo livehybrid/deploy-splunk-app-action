@@ -119,11 +119,22 @@ jobs:
           # runners, so stack session-key auth is NOT an option here.
           acs config add-stack "$ACS_STACK" || echo "stack already configured"
           acs config use-stack "$ACS_STACK"
-          # Non-interactive login: acs prompts on stdin for splunk.com user/password.
-          if ! printf '%s\n%s\n' "$SPLUNK_USERNAME" "$SPLUNK_PASSWORD" | acs login --token-user "$SPLUNKCLOUD_ADMIN_USER"; then
-            echo "---- acs login --help (for flag reference) ----"
-            acs login --help || true
+          # acs login's interactive path reads stack creds from a TTY (no TTY on a
+          # runner) and the stack's 8089 is firewalled, so mint an ephemeral stack
+          # JWT via the ACS tokens endpoint on admin.splunk.com (public), then let
+          # acs login cache it (the STACK_TOKEN env path from acs login --help).
+          TOK_RESP=$(curl -sS -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}" \
+            -X POST "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/tokens" \
+            -H 'Content-Type: application/json' \
+            -d "{\"user\":\"${SPLUNKCLOUD_ADMIN_USER}\",\"audience\":\"deploy-scde\",\"type\":\"ephemeral\",\"expiresOn\":\"+1h\"}")
+          STACK_TOKEN=$(echo "$TOK_RESP" | jq -r '.token // empty')
+          if [ -z "$STACK_TOKEN" ]; then
+            echo "::error::could not mint a stack token via the ACS tokens endpoint"
+            echo "$TOK_RESP" | jq 'del(.token)' 2>/dev/null || echo "$TOK_RESP"
             exit 1
           fi
+          echo "::add-mask::${STACK_TOKEN}"
+          export STACK_TOKEN
+          acs login --token-user "$SPLUNKCLOUD_ADMIN_USER"
           acs status current-stack
           acs apps bulk-install private --package-src-dir acs-pkgs/ --acs-legal-ack=Y
