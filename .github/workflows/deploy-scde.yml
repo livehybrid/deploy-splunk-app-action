@@ -334,26 +334,48 @@ jobs:
             else
               echo "::warning::splunkbase session login failed"
             fi
-            # TARGETED (specific-SH) install — the decisive attempt. The
-            # bulk-install above has just vetted these exact tarballs
-            # (reports are keyed on package hash), and run 32366546824 proved
-            # the targeted route decrypts our v2 stack token: pre-vetting it
-            # failed with "failed AppInspect validation", not the decrypt 400.
+            # TARGETED (specific-SH) install. Runs 32366546824 + 32367217378
+            # proved this route decrypts our v2 stack token EVERY time (the
+            # shared route only did so once in ~40 attempts — looks like a
+            # load-balanced-node lottery). Its remaining 400 is "Extract app
+            # information from the package failed" on a binary body, so permute
+            # body encoding (binary vs multipart) x X-header token kind.
             if [ -n "${SH_PREFIX:-}" ]; then
+              TGTBASE="https://admin.splunk.com/${SH_PREFIX}.${ACS_STACK}/adminconfig/v2/apps/victoria"
+              # plain = the documented example URL (?scope=local only) — our
+              # extra &splunkbase=false is itself a suspect for the parse 400.
               for pkg in acs-pkgs/*.tar.gz; do
-                code=$(curl -sS -o /tmp/tgt_install.json -w '%{http_code}' --max-time 900 -X POST \
-                  -H "Authorization: Bearer ${STACK_TOKEN}" \
-                  -H "X-Splunk-Authorization: ${API_TOKEN}" \
-                  -H 'ACS-Legal-Ack: Y' \
-                  --data-binary @"$pkg" \
-                  "https://admin.splunk.com/${SH_PREFIX}.${ACS_STACK}/adminconfig/v2/apps/victoria?scope=local&splunkbase=false")
-                echo "TARGETED install (post-vetting) $(basename "$pkg"): HTTP $code"
-                head -c 600 /tmp/tgt_install.json 2>/dev/null; echo
-                case "$code" in 200|201|202) acs_ok=1;; esac
+                for tcombo in binary-plain multipart-plain binary-sbparam multipart-sbparam binary-plain-sbsession multipart-plain-sbsession; do
+                  XV="$API_TOKEN"
+                  case "$tcombo" in *-sbsession)
+                    [ -z "$SB_SESSION" ] && continue
+                    XV="$SB_SESSION";;
+                  esac
+                  case "$tcombo" in
+                    *-sbparam*) TGTURL="${TGTBASE}?scope=local&splunkbase=false";;
+                    *)          TGTURL="${TGTBASE}?scope=local";;
+                  esac
+                  case "$tcombo" in
+                    binary-*)    BODY=(--data-binary @"$pkg");;
+                    multipart-*) BODY=(-F "package=@${pkg}");;
+                  esac
+                  code=$(curl -sS -o /tmp/tgt_install.json -w '%{http_code}' --max-time 900 -X POST \
+                    -H "Authorization: Bearer ${STACK_TOKEN}" \
+                    -H "X-Splunk-Authorization: ${XV}" \
+                    -H 'ACS-Legal-Ack: Y' \
+                    "${BODY[@]}" "$TGTURL")
+                  echo "TARGETED install [$tcombo] $(basename "$pkg"): HTTP $code"
+                  head -c 400 /tmp/tgt_install.json 2>/dev/null; echo
+                  case "$code" in 200|201|202) acs_ok=1; break;; esac
+                done
               done
             fi
             raw_fail=1
-            [ "$acs_ok" -eq 1 ] && { raw_fail=0; echo "targeted post-vetting install succeeded — skipping legacy raw attempts"; }
+            [ "$acs_ok" -eq 1 ] && { raw_fail=0; echo "targeted install succeeded — skipping shared-endpoint raw attempts"; }
+            # Shared-endpoint combos, 3 tries each: the 2026-08-20 run pair
+            # showed the decrypt failure is per-request nondeterministic
+            # (sb-session got HTTP 200 once, identical calls 400 before/after),
+            # so repeats buy real odds.
             [ "$raw_fail" -eq 1 ] && for pkg in acs-pkgs/*.tar.gz; do
               for combo in sb-session both-headers api-jwt; do
                 case "$combo" in
@@ -363,15 +385,19 @@ jobs:
                                 XH=(-H "X-Splunk-Authorization: ${API_TOKEN}" -H "X-Splunkbase-Authorization: ${SB_SESSION}");;
                   api-jwt)      XH=(-H "X-Splunk-Authorization: ${API_TOKEN}");;
                 esac
-                code=$(curl -sS -o /tmp/acs_raw.json -w '%{http_code}' --max-time 900 -X POST \
-                  -H "Authorization: Bearer ${STACK_TOKEN}" \
-                  "${XH[@]}" \
-                  -H 'ACS-Legal-Ack: Y' \
-                  --data-binary @"$pkg" \
-                  "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/apps/victoria?splunkbase=false")
-                echo "raw ACS install [$combo] $(basename "$pkg"): HTTP $code"
-                head -c 400 /tmp/acs_raw.json 2>/dev/null; echo
-                case "$code" in 200|201|202) raw_fail=0; break;; esac
+                for try in 1 2 3; do
+                  code=$(curl -sS -o /tmp/acs_raw.json -w '%{http_code}' --max-time 900 -X POST \
+                    -H "Authorization: Bearer ${STACK_TOKEN}" \
+                    "${XH[@]}" \
+                    -H 'ACS-Legal-Ack: Y' \
+                    --data-binary @"$pkg" \
+                    "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/apps/victoria?splunkbase=false")
+                  echo "raw ACS install [$combo try $try] $(basename "$pkg"): HTTP $code"
+                  head -c 400 /tmp/acs_raw.json 2>/dev/null; echo
+                  case "$code" in 200|201|202) raw_fail=0; break;; esac
+                  sleep 5
+                done
+                [ "$raw_fail" -eq 0 ] && break
               done
             done
             [ "$raw_fail" -eq 0 ] && acs_ok=1
