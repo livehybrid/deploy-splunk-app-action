@@ -370,14 +370,28 @@ jobs:
             else
               echo "::warning::splunkbase session login failed"
             fi
-            # TARGETED (specific-SH) install. Runs 32366546824 + 32367217378
-            # proved this route decrypts our v2 stack token EVERY time (the
-            # shared route only did so once in ~40 attempts — looks like a
-            # load-balanced-node lottery). Its remaining 400 is "Extract app
-            # information from the package failed" on a binary body, so permute
-            # body encoding (binary vs multipart) x X-header token kind.
+            # TARGETED (specific-SH) install. Root cause (diag runs 32415199049
+            # + 32416605575, 2026-08-20): the SCDE stack is a hidden 3-member
+            # SHC; JWT `iss` names the minting member and each member signs
+            # locally, so a token only validates on the member that minted it.
+            # The shared install route forwards to an arbitrary member =
+            # lottery. Deterministic fix: mint the Bearer via the TARGETED ACS
+            # tokens endpoint on the SAME member we install to (public
+            # admin.splunk.com, no 8089 needed), then install targeted.
             if [ -n "${SH_PREFIX:-}" ]; then
               TGTBASE="https://admin.splunk.com/${SH_PREFIX}.${ACS_STACK}/adminconfig/v2/apps/victoria"
+              tmr=$(curl -sS -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}" \
+                -X POST "https://admin.splunk.com/${SH_PREFIX}.${ACS_STACK}/adminconfig/v2/tokens" \
+                -H 'Content-Type: application/json' \
+                -d "{\"user\":\"${SPLUNKCLOUD_ADMIN_USER}\",\"audience\":\"deploy-scde-tgt\",\"type\":\"ephemeral\",\"expiresOn\":\"+2h\"}")
+              TGT_TOKEN=$(echo "$tmr" | jq -r '.token // empty')
+              if [ -n "$TGT_TOKEN" ]; then
+                echo "::add-mask::${TGT_TOKEN}"
+                echo "Bearer for targeted install minted ON ${SH_PREFIX} via targeted ACS tokens endpoint"
+              else
+                TGT_TOKEN="$STACK_TOKEN"
+                echo "::warning::targeted mint failed ($(echo "$tmr" | head -c 200)) — falling back to the LB-minted token (member-match lottery)"
+              fi
               # plain = the documented example URL (?scope=local only) — our
               # extra &splunkbase=false is itself a suspect for the parse 400.
               for pkg in acs-pkgs/*.tar.gz; do
@@ -399,7 +413,7 @@ jobs:
                     multipart-*) BODY=(-F "package=@${pkg}");;
                   esac
                   code=$(curl -sS -o /tmp/tgt_install.json -w '%{http_code}' --max-time 900 -X POST \
-                    -H "Authorization: Bearer ${STACK_TOKEN}" \
+                    -H "Authorization: Bearer ${TGT_TOKEN}" \
                     -H "X-Splunk-Authorization: ${XV}" \
                     -H 'ACS-Legal-Ack: Y' \
                     "${BODY[@]}" "$TGTURL")
