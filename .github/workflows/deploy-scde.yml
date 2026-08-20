@@ -20,6 +20,14 @@ name: Deploy to SCDE
 #   - Token preference order: 1P `token` field > on-stack mint (runner IP is
 #     ACS-allowlisted for search-api just for the run, then removed) > ACS mint
 #     (last resort; known-broken for install on SCDE).
+#   - 2026-08-20 WORKAROUND: the TARGETED install route
+#     (https://admin.splunk.com/<sh-prefix>.<stack>/adminconfig/v2/apps/victoria
+#     ?scope=local&splunkbase=false, binary body, AppInspect JWT in X) decrypts
+#     the stack token on every attempt where the shared route almost always
+#     400s. SH prefix = first label of serverName (cycles with every SCDE
+#     hibernation, so it is re-read each run). Occasional spurious 400 "Extract
+#     app information from the package failed" — retries cover it. Full
+#     forensics: aios data/splunkbase-maintenance/SCDE-ACS-INSTALL-BLOCKER.md.
 #   ACS stack name is derived by stripping .splunkcloud.com from the hostname.
 
 on:
