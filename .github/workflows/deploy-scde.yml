@@ -20,6 +20,14 @@ name: Deploy to SCDE
 #   - Token preference order: 1P `token` field > on-stack mint (runner IP is
 #     ACS-allowlisted for search-api just for the run, then removed) > ACS mint
 #     (last resort; known-broken for install on SCDE).
+#   - 2026-08-20 WORKAROUND: the TARGETED install route
+#     (https://admin.splunk.com/<sh-prefix>.<stack>/adminconfig/v2/apps/victoria
+#     ?scope=local&splunkbase=false, binary body, AppInspect JWT in X) decrypts
+#     the stack token on every attempt where the shared route almost always
+#     400s. SH prefix = first label of serverName (cycles with every SCDE
+#     hibernation, so it is re-read each run). Occasional spurious 400 "Extract
+#     app information from the package failed" — retries cover it. Full
+#     forensics: aios data/splunkbase-maintenance/SCDE-ACS-INSTALL-BLOCKER.md.
 #   ACS stack name is derived by stripping .splunkcloud.com from the hostname.
 
 on:
@@ -265,12 +273,49 @@ jobs:
             sleep 60
           done
           acs status current-stack
-          # 1) acs CLI install. On SCDE/Splunk 10 the install endpoint currently
-          #    rejects EVERY token kind with "Failed to decrypt the token"
-          #    (ACS-minted, stack REST-minted, CLI v2.23-v2.25 — all verified
-          #    2026-08-17; vetting accepts the same token). Splunk-side bug.
+          # 0) TARGETED-SH install experiment (2026-08-20). Docs "Targeted app
+          #    installation on Victoria Experience" (needs 10.2.2510+; stack is
+          #    10.5): prefix the ACS host with the search-head prefix and add
+          #    scope=local. Hypothesis: the targeted route reaches a different
+          #    backend path than the shared install and may decrypt the ver:v2
+          #    stack token that the shared path 400s on. The SH prefix is not
+          #    listable via any API — derive it from serverName on 8089.
           acs_ok=0
-          if acs apps bulk-install private --package-src-dir acs-pkgs/ --acs-legal-ack=Y; then
+          SH_PREFIX=""
+          if [ "${MGMT_OPEN:-0}" = "1" ]; then
+            sinfo=$(curl -k -sS -u "${SPLUNKCLOUD_ADMIN_USER}:${SPLUNKCLOUD_ADMIN_PASSWORD}" \
+              "https://${SPLUNKCLOUD_STACK_URL}:8089/services/server/info?output_mode=json" || true)
+            sname=$(echo "$sinfo" | jq -r '.entry[0].content.serverName // empty' 2>/dev/null)
+            hfqdn=$(echo "$sinfo" | jq -r '.entry[0].content.host_fqdn // empty' 2>/dev/null)
+            echo "on-stack serverName='${sname}' host_fqdn='${hfqdn}'"
+            SH_PREFIX="${sname%%.*}"
+          fi
+          if [ -n "$SH_PREFIX" ]; then
+            TGT="https://admin.splunk.com/${SH_PREFIX}.${ACS_STACK}/adminconfig/v2"
+            echo "targeted ACS base: $TGT"
+            # Control probe: a targeted read tells us whether the prefix routes
+            # at all (404/DNS-ish error = wrong prefix, not a token problem).
+            gcode=$(curl -sS -o /tmp/tgt_probe.json -w '%{http_code}' \
+              -H "Authorization: Bearer ${STACK_TOKEN}" "$TGT/apps/victoria?count=1")
+            echo "targeted control GET apps/victoria: HTTP $gcode"
+            head -c 300 /tmp/tgt_probe.json 2>/dev/null; echo
+            # RUN 32366546824 (2026-08-20): a PRE-vetting targeted install
+            # returned 400 "This app has failed AppInspect validation" — i.e.
+            # the token DECRYPTED fine on this route (the shared path 400s on
+            # decrypt before ever reaching vetting lookup). Vetting reports are
+            # keyed on package hash, so the install attempt now happens in the
+            # fallback branch below, AFTER `acs apps bulk-install` has vetted
+            # the identical tarball.
+          else
+            echo "no SH prefix discovered (mgmt window closed or serverName empty) — skipping targeted attempt"
+          fi
+          # 1) acs CLI install. On SCDE/Splunk 10 the shared install endpoint
+          #    currently rejects EVERY token kind with "Failed to decrypt the
+          #    token" (ACS-minted, stack REST-minted, CLI v2.23-v2.25 — all
+          #    verified 2026-08-17; vetting accepts the same token).
+          if [ "$acs_ok" -eq 1 ]; then
+            echo "targeted install succeeded — skipping shared-endpoint attempts"
+          elif acs apps bulk-install private --package-src-dir acs-pkgs/ --acs-legal-ack=Y; then
             acs_ok=1
           else
             echo "acs CLI install failed — raw ACS POST with api.splunk.com vetting token in X-Splunk-Authorization"
@@ -297,8 +342,52 @@ jobs:
             else
               echo "::warning::splunkbase session login failed"
             fi
+            # TARGETED (specific-SH) install. Runs 32366546824 + 32367217378
+            # proved this route decrypts our v2 stack token EVERY time (the
+            # shared route only did so once in ~40 attempts — looks like a
+            # load-balanced-node lottery). Its remaining 400 is "Extract app
+            # information from the package failed" on a binary body, so permute
+            # body encoding (binary vs multipart) x X-header token kind.
+            if [ -n "${SH_PREFIX:-}" ]; then
+              TGTBASE="https://admin.splunk.com/${SH_PREFIX}.${ACS_STACK}/adminconfig/v2/apps/victoria"
+              # plain = the documented example URL (?scope=local only) — our
+              # extra &splunkbase=false is itself a suspect for the parse 400.
+              for pkg in acs-pkgs/*.tar.gz; do
+                # binary-sbparam first: run 32368491854 installed with it
+                # (?scope=local alone consistently 400s "Extract app
+                # information", with either body encoding).
+                for tcombo in binary-sbparam binary-sbparam binary-sbparam multipart-sbparam binary-plain multipart-plain binary-plain-sbsession; do
+                  XV="$API_TOKEN"
+                  case "$tcombo" in *-sbsession)
+                    [ -z "$SB_SESSION" ] && continue
+                    XV="$SB_SESSION";;
+                  esac
+                  case "$tcombo" in
+                    *-sbparam*) TGTURL="${TGTBASE}?scope=local&splunkbase=false";;
+                    *)          TGTURL="${TGTBASE}?scope=local";;
+                  esac
+                  case "$tcombo" in
+                    binary-*)    BODY=(--data-binary @"$pkg");;
+                    multipart-*) BODY=(-F "package=@${pkg}");;
+                  esac
+                  code=$(curl -sS -o /tmp/tgt_install.json -w '%{http_code}' --max-time 900 -X POST \
+                    -H "Authorization: Bearer ${STACK_TOKEN}" \
+                    -H "X-Splunk-Authorization: ${XV}" \
+                    -H 'ACS-Legal-Ack: Y' \
+                    "${BODY[@]}" "$TGTURL")
+                  echo "TARGETED install [$tcombo] $(basename "$pkg"): HTTP $code"
+                  head -c 400 /tmp/tgt_install.json 2>/dev/null; echo
+                  case "$code" in 200|201|202) acs_ok=1; break;; esac
+                done
+              done
+            fi
             raw_fail=1
-            for pkg in acs-pkgs/*.tar.gz; do
+            [ "$acs_ok" -eq 1 ] && { raw_fail=0; echo "targeted install succeeded — skipping shared-endpoint raw attempts"; }
+            # Shared-endpoint combos, 3 tries each: the 2026-08-20 run pair
+            # showed the decrypt failure is per-request nondeterministic
+            # (sb-session got HTTP 200 once, identical calls 400 before/after),
+            # so repeats buy real odds.
+            [ "$raw_fail" -eq 1 ] && for pkg in acs-pkgs/*.tar.gz; do
               for combo in sb-session both-headers api-jwt; do
                 case "$combo" in
                   sb-session)   [ -z "$SB_SESSION" ] && continue
@@ -307,15 +396,19 @@ jobs:
                                 XH=(-H "X-Splunk-Authorization: ${API_TOKEN}" -H "X-Splunkbase-Authorization: ${SB_SESSION}");;
                   api-jwt)      XH=(-H "X-Splunk-Authorization: ${API_TOKEN}");;
                 esac
-                code=$(curl -sS -o /tmp/acs_raw.json -w '%{http_code}' --max-time 900 -X POST \
-                  -H "Authorization: Bearer ${STACK_TOKEN}" \
-                  "${XH[@]}" \
-                  -H 'ACS-Legal-Ack: Y' \
-                  --data-binary @"$pkg" \
-                  "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/apps/victoria?splunkbase=false")
-                echo "raw ACS install [$combo] $(basename "$pkg"): HTTP $code"
-                head -c 400 /tmp/acs_raw.json 2>/dev/null; echo
-                case "$code" in 200|201|202) raw_fail=0; break;; esac
+                for try in 1 2 3; do
+                  code=$(curl -sS -o /tmp/acs_raw.json -w '%{http_code}' --max-time 900 -X POST \
+                    -H "Authorization: Bearer ${STACK_TOKEN}" \
+                    "${XH[@]}" \
+                    -H 'ACS-Legal-Ack: Y' \
+                    --data-binary @"$pkg" \
+                    "https://admin.splunk.com/${ACS_STACK}/adminconfig/v2/apps/victoria?splunkbase=false")
+                  echo "raw ACS install [$combo try $try] $(basename "$pkg"): HTTP $code"
+                  head -c 400 /tmp/acs_raw.json 2>/dev/null; echo
+                  case "$code" in 200|201|202) raw_fail=0; break;; esac
+                  sleep 5
+                done
+                [ "$raw_fail" -eq 0 ] && break
               done
             done
             [ "$raw_fail" -eq 0 ] && acs_ok=1
