@@ -345,7 +345,10 @@ jobs:
               # plain = the documented example URL (?scope=local only) — our
               # extra &splunkbase=false is itself a suspect for the parse 400.
               for pkg in acs-pkgs/*.tar.gz; do
-                for tcombo in binary-plain multipart-plain binary-sbparam multipart-sbparam binary-plain-sbsession multipart-plain-sbsession; do
+                # binary-sbparam first: run 32368491854 installed with it
+                # (?scope=local alone consistently 400s "Extract app
+                # information", with either body encoding).
+                for tcombo in binary-sbparam binary-sbparam binary-sbparam multipart-sbparam binary-plain multipart-plain binary-plain-sbsession; do
                   XV="$API_TOKEN"
                   case "$tcombo" in *-sbsession)
                     [ -z "$SB_SESSION" ] && continue
