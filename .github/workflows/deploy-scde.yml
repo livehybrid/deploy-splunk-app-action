@@ -290,6 +290,34 @@ jobs:
             echo "on-stack serverName='${sname}' host_fqdn='${hfqdn}'"
             SH_PREFIX="${sname%%.*}"
           fi
+          if [ -z "$SH_PREFIX" ]; then
+            # 8089-free discovery: no ACS endpoint exposes the SH name on a
+            # standalone stack (checked the full OpenAPI spec 2026-08-20), but
+            # splunkweb on 443 is public on SCDE and proxies splunkd REST at
+            # /en-US/splunkd/__raw — same login flow as the upload fallback.
+            UI="https://${SPLUNKCLOUD_STACK_URL}"
+            DJ=/tmp/disc_cookiejar
+            rm -f "$DJ"
+            curl -k -sS -c "$DJ" -o /dev/null "$UI/en-US/account/login"
+            dcval=$(awk '$6=="cval" {print $7}' "$DJ" | tail -1)
+            curl -k -sS -b "$DJ" -c "$DJ" -o /dev/null \
+              --data-urlencode "username=${SPLUNKCLOUD_ADMIN_USER}" \
+              --data-urlencode "password=${SPLUNKCLOUD_ADMIN_PASSWORD}" \
+              --data-urlencode "cval=${dcval}" \
+              --data-urlencode "set_has_logged_in=false" \
+              "$UI/en-US/account/login"
+            DCOOKIES=$(awk 'NR>4 && $6!="" {printf "%s=%s; ", $6, $7}' "$DJ")
+            sinfo=$(curl -k -sS -H "Cookie: ${DCOOKIES%; }" \
+              "$UI/en-US/splunkd/__raw/services/server/info?output_mode=json" || true)
+            sname=$(echo "$sinfo" | jq -r '.entry[0].content.serverName // empty' 2>/dev/null)
+            if [ -n "$sname" ]; then
+              echo "serverName via splunkweb __raw proxy (443): '${sname}'"
+              SH_PREFIX="${sname%%.*}"
+            else
+              echo "web-proxy serverName discovery failed; response head:"
+              echo "$sinfo" | head -c 300; echo
+            fi
+          fi
           if [ -n "$SH_PREFIX" ]; then
             TGT="https://admin.splunk.com/${SH_PREFIX}.${ACS_STACK}/adminconfig/v2"
             echo "targeted ACS base: $TGT"
