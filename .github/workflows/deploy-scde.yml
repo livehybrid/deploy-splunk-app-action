@@ -291,33 +291,13 @@ jobs:
               -H "Authorization: Bearer ${STACK_TOKEN}" "$TGT/apps/victoria?count=1")
             echo "targeted control GET apps/victoria: HTTP $gcode"
             head -c 300 /tmp/tgt_probe.json 2>/dev/null; echo
-            TGT_API_TOKEN=$(curl -sS -u "${SPLUNK_USERNAME}:${SPLUNK_PASSWORD}" \
-              "https://api.splunk.com/2.0/rest/login/splunk" | jq -r '.data.token // empty')
-            if [ -n "$TGT_API_TOKEN" ]; then
-              echo "::add-mask::${TGT_API_TOKEN}"
-              for pkg in acs-pkgs/*.tar.gz; do
-                code=$(curl -sS -o /tmp/tgt_install.json -w '%{http_code}' --max-time 900 -X POST \
-                  -H "Authorization: Bearer ${STACK_TOKEN}" \
-                  -H "X-Splunk-Authorization: ${TGT_API_TOKEN}" \
-                  -H 'ACS-Legal-Ack: Y' \
-                  --data-binary @"$pkg" \
-                  "$TGT/apps/victoria?scope=local&splunkbase=false")
-                echo "TARGETED install $(basename "$pkg"): HTTP $code"
-                head -c 600 /tmp/tgt_install.json 2>/dev/null; echo
-                case "$code" in 200|201|202) acs_ok=1;; esac
-              done
-            else
-              echo "::warning::could not mint api.splunk.com token — skipping targeted raw install"
-            fi
-            # CLI variant, only if this acs build supports targeting installs.
-            if [ "$acs_ok" -ne 1 ] && acs apps install private --help 2>&1 | grep -q -- '--target-sh'; then
-              for pkg in acs-pkgs/*.tar.gz; do
-                echo "acs CLI targeted install: $(basename "$pkg") --target-sh $SH_PREFIX"
-                if acs apps install private --acs-legal-ack=Y --target-sh "$SH_PREFIX" --app-package "$pkg"; then
-                  acs_ok=1
-                fi
-              done
-            fi
+            # RUN 32366546824 (2026-08-20): a PRE-vetting targeted install
+            # returned 400 "This app has failed AppInspect validation" — i.e.
+            # the token DECRYPTED fine on this route (the shared path 400s on
+            # decrypt before ever reaching vetting lookup). Vetting reports are
+            # keyed on package hash, so the install attempt now happens in the
+            # fallback branch below, AFTER `acs apps bulk-install` has vetted
+            # the identical tarball.
           else
             echo "no SH prefix discovered (mgmt window closed or serverName empty) — skipping targeted attempt"
           fi
@@ -354,8 +334,27 @@ jobs:
             else
               echo "::warning::splunkbase session login failed"
             fi
+            # TARGETED (specific-SH) install — the decisive attempt. The
+            # bulk-install above has just vetted these exact tarballs
+            # (reports are keyed on package hash), and run 32366546824 proved
+            # the targeted route decrypts our v2 stack token: pre-vetting it
+            # failed with "failed AppInspect validation", not the decrypt 400.
+            if [ -n "${SH_PREFIX:-}" ]; then
+              for pkg in acs-pkgs/*.tar.gz; do
+                code=$(curl -sS -o /tmp/tgt_install.json -w '%{http_code}' --max-time 900 -X POST \
+                  -H "Authorization: Bearer ${STACK_TOKEN}" \
+                  -H "X-Splunk-Authorization: ${API_TOKEN}" \
+                  -H 'ACS-Legal-Ack: Y' \
+                  --data-binary @"$pkg" \
+                  "https://admin.splunk.com/${SH_PREFIX}.${ACS_STACK}/adminconfig/v2/apps/victoria?scope=local&splunkbase=false")
+                echo "TARGETED install (post-vetting) $(basename "$pkg"): HTTP $code"
+                head -c 600 /tmp/tgt_install.json 2>/dev/null; echo
+                case "$code" in 200|201|202) acs_ok=1;; esac
+              done
+            fi
             raw_fail=1
-            for pkg in acs-pkgs/*.tar.gz; do
+            [ "$acs_ok" -eq 1 ] && { raw_fail=0; echo "targeted post-vetting install succeeded — skipping legacy raw attempts"; }
+            [ "$raw_fail" -eq 1 ] && for pkg in acs-pkgs/*.tar.gz; do
               for combo in sb-session both-headers api-jwt; do
                 case "$combo" in
                   sb-session)   [ -z "$SB_SESSION" ] && continue
