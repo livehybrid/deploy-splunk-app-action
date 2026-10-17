@@ -1,0 +1,28 @@
+name: Test
+
+# Unit tests for the scripts this repo ships (not a reusable workflow).
+on:
+  push:
+    branches: ["**"]
+    paths: ["splunkbase-publish/**", ".github/workflows/test.yml"]
+  pull_request:
+    paths: ["splunkbase-publish/**", ".github/workflows/test.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  splunkbase-publish:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # publish.py is stdlib-only and must run on whatever python3 a runner has.
+        python-version: ["3.9", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install pytest
+      - run: pytest -q splunkbase-publish

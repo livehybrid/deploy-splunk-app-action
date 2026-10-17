@@ -1,0 +1,134 @@
+name: Publish to Splunkbase
+
+# Reusable: uploads the packaged app to its existing Splunkbase listing through
+# the Splunkbase release API, waits for Splunkbase's own validation, and only
+# then makes the release public and sets it as latest. Flow and guards are in
+# splunkbase-publish/publish.py; in short it refuses a package whose app id
+# does not match the listing, an archived listing, or an out-of-order version,
+# and treats an already-published version as success, so a re-run is a no-op.
+#
+# Runs on a v* tag (normally `needs:` the GitHub release job, which itself
+# needs every gate), or on demand for an existing GitHub release via
+# `release_tag`. Tag-triggered uploads are OFF until the caller repo sets the
+# repository variable SPLUNKBASE_PUBLISH_ENABLED=true:
+#   gh variable set SPLUNKBASE_PUBLISH_ENABLED --body true -R livehybrid/<repo>
+# `dry_run` (listing checks + login, upload nothing) and `force` run regardless.
+#
+# The first release of a brand-new app is created in the Splunkbase UI; the
+# API can only add releases to a listing that exists.
+
+on:
+  workflow_call:
+    inputs:
+      app_id:
+        description: Numeric Splunkbase app id (the number in the listing URL). Empty skips the job.
+        type: string
+        required: true
+      splunk_versions:
+        description: >-
+          Comma-separated Splunk versions this release supports, e.g. "10.6,10.4,10.2,10.0,9.4".
+          No default on purpose: claim only what the app is tested against.
+        type: string
+        required: true
+      cim_versions:
+        description: Comma-separated CIM versions, e.g. "6.x". Leave empty if the app is not CIM-mapped.
+        type: string
+        default: ""
+      visible:
+        description: Make the release public once Splunkbase validation passes. false leaves it hidden.
+        type: boolean
+        default: true
+      release_notes:
+        description: Release notes text. Default links to the GitHub release.
+        type: string
+        default: ""
+      release_tag:
+        description: Publish this existing GitHub release's .tar.gz asset instead of this run's dist artifact.
+        type: string
+        default: ""
+      dry_run:
+        description: Listing checks and login only; upload nothing.
+        type: boolean
+        default: false
+      force:
+        description: Run even while SPLUNKBASE_PUBLISH_ENABLED is not set (deliberate manual publish).
+        type: boolean
+        default: false
+      package_id:
+        description: Finish an earlier upload that timed out in validation (skips the upload).
+        type: string
+        default: ""
+      timeout_seconds:
+        description: How long to wait for Splunkbase validation.
+        type: number
+        default: 1800
+      tooling_ref:
+        description: Ref of livehybrid/deploy-splunk-app-action to take publish.py from.
+        type: string
+        default: main
+    secrets:
+      splunkbase_username:
+        required: true
+      splunkbase_password:
+        required: true
+
+jobs:
+  publish-splunkbase:
+    # Dependabot actors get no secrets, so this could only fail for them.
+    if: >-
+      github.actor != 'dependabot[bot]' && inputs.app_id != '' &&
+      (startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') &&
+      (vars.SPLUNKBASE_PUBLISH_ENABLED == 'true' || inputs.force || inputs.dry_run)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    # One upload per listing at a time: Splunkbase rejects a new release while
+    # another is still validating.
+    concurrency:
+      group: splunkbase-${{ inputs.app_id }}
+      cancel-in-progress: false
+    steps:
+      - name: Fetch publisher
+        uses: actions/checkout@v6
+        with:
+          repository: livehybrid/deploy-splunk-app-action
+          ref: ${{ inputs.tooling_ref }}
+          path: .splunkbase-tooling
+          sparse-checkout: splunkbase-publish
+
+      - name: Download this run's package
+        if: inputs.release_tag == ''
+        uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Download the release's package
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.tar.gz' --dir dist
+
+      - name: Publish
+        env:
+          SPLUNKBASE_USERNAME: ${{ secrets.splunkbase_username }}
+          SPLUNKBASE_PASSWORD: ${{ secrets.splunkbase_password }}
+          APP_ID: ${{ inputs.app_id }}
+          SPLUNK_VERSIONS: ${{ inputs.splunk_versions }}
+          CIM_VERSIONS: ${{ inputs.cim_versions }}
+          VISIBLE: ${{ inputs.visible }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          PACKAGE_ID: ${{ inputs.package_id }}
+          TIMEOUT: ${{ inputs.timeout_seconds }}
+          NOTES: ${{ inputs.release_notes }}
+          TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          args=(--app-id "$APP_ID" --package dist --splunk-versions "$SPLUNK_VERSIONS"
+                --cim-versions "$CIM_VERSIONS" --timeout "$TIMEOUT"
+                --release-notes "${NOTES:-Release notes: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG}")
+          [ "$VISIBLE" = "true" ] || args+=(--hidden)
+          [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
+          [ -n "$PACKAGE_ID" ] && args+=(--package-id "$PACKAGE_ID")
+          python3 .splunkbase-tooling/splunkbase-publish/publish.py "${args[@]}"

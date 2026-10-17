@@ -6,7 +6,8 @@ Splunk apps and add-ons. One place to change a gate, every add-on gets it.
 This repo gives you two things:
 
 1. **A composite action** (`action.yml`) that builds and packages a UCC add-on.
-2. **Reusable workflows** (`.github/workflows/`) for AppInspect and publishing.
+2. **Reusable workflows** (`.github/workflows/`) for AppInspect and publishing
+   (GitHub release and Splunkbase).
 
 Most repos use the reusable workflows, and either the composite action or their
 own build step. A complete worked example lives in
@@ -93,6 +94,47 @@ cannot ship an add-on.
 | Inputs | none |
 | Secrets | none |
 
+### `publish-splunkbase.yml`
+
+Publishes the packaged artifact to the app's existing Splunkbase listing
+through the Splunkbase release API. Same flow Splunk use for their own add-ons:
+
+1. Checks the public listing before sending anything: the package's app id
+   must match the listing, the listing must not be archived, and the version
+   must be newer than the newest release. A version that is already published
+   counts as success, so re-running a tag pipeline is a no-op.
+2. Logs in at `api.splunk.com` for a JWT (Splunkbase's preferred auth).
+3. Uploads the release **hidden**.
+4. Waits for Splunkbase's own validation.
+5. Only on a pass: makes the release public with release notes, and sets it as
+   the listing's latest release.
+
+A failed validation never goes public; it leaves a hidden release you can
+delete in the Splunkbase UI. A public release can never be deleted or
+replaced, which is why it is the last step.
+
+Runs on a `v*` tag, or for an existing GitHub release via `release_tag`.
+Tag-triggered uploads are **off** until the caller repo sets the repository
+variable `SPLUNKBASE_PUBLISH_ENABLED=true`, so a fork or a fresh template
+never uploads by accident. `dry_run` and `force` run regardless.
+
+| | |
+|---|---|
+| Inputs | `app_id` (required), `splunk_versions` (required, e.g. `10.6,10.4,10.2,10.0,9.4`), `cim_versions`, `visible` (default `true`), `release_notes` (default links the GitHub release), `release_tag`, `dry_run`, `force`, `package_id` (finish an upload that timed out), `timeout_seconds` (default 1800), `tooling_ref` |
+| Secrets | `splunkbase_username`, `splunkbase_password` (the same splunk.com account as the AppInspect API) |
+
+`splunk_versions` has no default on purpose: claim only the versions the app
+is tested against. The first release of a brand-new app has to be created in
+the Splunkbase UI, because the API can only add releases to a listing.
+
+The publisher is `splunkbase-publish/publish.py`, standard library only, so it
+also runs by hand:
+
+```bash
+SPLUNKBASE_USERNAME=... SPLUNKBASE_PASSWORD=... python3 splunkbase-publish/publish.py \
+  --app-id 4207 --package dist/ --splunk-versions 10.6,10.4,10.2,10.0,9.4 --dry-run
+```
+
 ### `deploy-scde.yml`
 
 Optional, off by default, and not part of the recommended pattern. Installs the
@@ -149,6 +191,46 @@ jobs:
     permissions:
       contents: write
     uses: livehybrid/deploy-splunk-app-action/.github/workflows/publish.yml@main
+
+  publish-splunkbase:
+    # Tag runs only, after the GitHub release. Off until the repo variable
+    # SPLUNKBASE_PUBLISH_ENABLED=true; app id from the repo variable too.
+    needs: publish
+    permissions:
+      contents: read
+    uses: livehybrid/deploy-splunk-app-action/.github/workflows/publish-splunkbase.yml@main
+    with:
+      app_id: ${{ vars.SPLUNKBASE_APP_ID }}
+      splunk_versions: "10.6,10.4,10.2,10.0,9.4"
+    secrets:
+      splunkbase_username: ${{ secrets.SPLUNKBASE_USERNAME }}
+      splunkbase_password: ${{ secrets.SPLUNKBASE_PASSWORD }}
+```
+
+To publish a release that already exists on GitHub (or to rehearse with
+`dry_run`), add a small dispatch workflow:
+
+```yaml
+name: Publish a release to Splunkbase
+on:
+  workflow_dispatch:
+    inputs:
+      tag: { description: "Existing release tag, e.g. v1.2.2", required: true }
+      dry_run: { type: boolean, default: true }
+jobs:
+  publish:
+    permissions:
+      contents: read
+    uses: livehybrid/deploy-splunk-app-action/.github/workflows/publish-splunkbase.yml@main
+    with:
+      app_id: ${{ vars.SPLUNKBASE_APP_ID }}
+      splunk_versions: "10.6,10.4,10.2,10.0,9.4"
+      release_tag: ${{ inputs.tag }}
+      dry_run: ${{ inputs.dry_run }}
+      force: true
+    secrets:
+      splunkbase_username: ${{ secrets.SPLUNKBASE_USERNAME }}
+      splunkbase_password: ${{ secrets.SPLUNKBASE_PASSWORD }}
 ```
 
 ## Run the same checks locally
