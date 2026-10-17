@@ -36,15 +36,14 @@ jobs:
             name: dist
             path: dist/
         - name: scan
-          # Forked action: builds on python:3.12 so the well-formed Python
-          # check parses modern vendored libs. Upstream pins a python:3.7.10
-          # image that SyntaxErrors on them. See livehybrid/appinspect-cli-action.
-          #
-          # 2.13.1 fixes a regex that raised re.error on 3.11+, which made the
-          # whole .appinspect.expect.yaml waiver mechanism inert on this fork:
-          # any repo with a legitimate documented waiver failed anyway, with a
-          # traceback that said nothing about the app.
-          uses: livehybrid/appinspect-cli-action@v2.15.0-py312
+          # Forked action: upstream 2.17.0 (Python 3.13, AppInspect 4.3.1) built
+          # from the fork's Dockerfile, because upstream's prebuilt image still
+          # carries compare_checks.py's inline (?i) ticket-id regex. That raises
+          # re.error on Python 3.11+, which makes the .appinspect.expect.yaml
+          # waiver mechanism inert: a repo with a documented waiver fails anyway,
+          # with a traceback that says nothing about the app. The fork's selftest
+          # workflow proves the waiver path. See livehybrid/appinspect-cli-action.
+          uses: livehybrid/appinspect-cli-action@v2.17.0-py313
           with:
             app_path: dist/
             included_tags: ${{ matrix.tags }}
