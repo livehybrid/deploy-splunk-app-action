@@ -46,6 +46,10 @@ runs:
         with:
           version: ${{ steps.version.outputs.VERSION_WITH_HASH }}
 
+      - name: Bundled certifi does not trust the compromised eMudhra root
+        shell: bash
+        run: python3 "${{ github.action_path }}/scripts/check_bundled_certifi.py" output
+
       - name: Generate Package tarball
         shell: bash
         run: |
