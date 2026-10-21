@@ -4,9 +4,9 @@ name: Test
 on:
   push:
     branches: ["**"]
-    paths: ["splunkbase-publish/**", ".github/workflows/test.yml"]
+    paths: ["splunkbase-publish/**", "scripts/**", ".github/workflows/test.yml"]
   pull_request:
-    paths: ["splunkbase-publish/**", ".github/workflows/test.yml"]
+    paths: ["splunkbase-publish/**", "scripts/**", ".github/workflows/test.yml"]
 
 permissions:
   contents: read
@@ -26,3 +26,34 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install pytest
       - run: pytest -q splunkbase-publish
+
+  check-bundled-certifi:
+    # The guard must fail on a bundle that still trusts emSign ECC Root CA - G3
+    # and pass on certifi 2026.10.19, using the real published wheels.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Guard rejects old bundles and accepts 2026.10.19
+        shell: bash
+        run: |
+          set -u
+          for v in 2026.7.22 2026.10.18 2026.10.19; do
+            pip download --quiet --no-deps "certifi==$v" -d "wheels/$v"
+            mkdir -p "apps/$v/TA-x/lib"
+            python3 -c "import zipfile,glob,sys; zipfile.ZipFile(glob.glob(sys.argv[1]+'/*.whl')[0]).extractall(sys.argv[2])" "wheels/$v" "apps/$v/TA-x/lib"
+          done
+          mkdir -p apps/none/TA-y/lib
+          expect() { if python3 scripts/check_bundled_certifi.py "apps/$2"; then got=pass; else got=fail; fi
+                     [ "$got" = "$1" ] || { echo "::error::$2: expected $1, got $got"; exit 1; }; }
+          expect fail 2026.7.22
+          expect fail 2026.10.18
+          expect pass 2026.10.19
+          expect pass none
+          # An old bundle claiming a new version must still fail on the root itself.
+          mkdir -p apps/lying/TA-z/lib
+          cp -r apps/2026.7.22/TA-x/lib/certifi apps/lying/TA-z/lib/
+          sed -i 's/__version__ = .*/__version__ = "2026.10.19"/' apps/lying/TA-z/lib/certifi/__init__.py
+          expect fail lying
