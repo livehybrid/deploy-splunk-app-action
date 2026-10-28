@@ -1,0 +1,121 @@
+# Self-test for the AppInspect CLI action pinned in appinspect-cli.yml.
+#
+# Runs that exact action tag against a real published add-on and proves the
+# expected-failures (waiver) path, which is what broke before v2.17.1: the old
+# inline (?i) ticket-id regex raised re.error on Python 3.11+, so a documented
+# waiver failed the build anyway. Ported from the selftest in the retired fork
+# livehybrid/appinspect-cli-action.
+#
+# The package is TA-aws-trusted-advisor 1.2.2 with a local/ directory added,
+# which AppInspect reports as a real `failure` under the cloud tag.
+name: appinspect-cli selftest
+
+on:
+  pull_request:
+    paths: [".github/workflows/appinspect-cli.yml", ".github/workflows/appinspect-cli-selftest.yml"]
+  push:
+    branches: [main]
+    paths: [".github/workflows/appinspect-cli.yml", ".github/workflows/appinspect-cli-selftest.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # `uses:` cannot take a variable, so the tag is written twice. Fail if the
+      # reusable workflow and this test have drifted apart.
+      - name: Same action tag as appinspect-cli.yml
+        run: |
+          want=$(grep -o 'splunk/appinspect-cli-action@[^ ]*' .github/workflows/appinspect-cli.yml | sort -u)
+          have=$(grep -o '^ *uses: splunk/appinspect-cli-action@[^ ]*' .github/workflows/appinspect-cli-selftest.yml | awk '{print $2}' | sort -u)
+          echo "workflow: $want"; echo "selftest: $have"
+          [ -n "$want" ] && [ "$want" = "$have" ]
+
+      - name: Fetch a real package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v1.2.2 --repo livehybrid/TA-aws-trusted-advisor --pattern '*.tar.gz' --dir clean
+          mkdir -p pkg tamper && tar -xzf clean/*.tar.gz -C tamper
+          mkdir -p tamper/TA-aws-trusted-advisor/local
+          printf '[install]\nis_configured = 1\n' > tamper/TA-aws-trusted-advisor/local/app.conf
+          tar -czf pkg/TA-aws-trusted-advisor.tar.gz -C tamper TA-aws-trusted-advisor
+          cat > waived-ok.yaml <<'YAML'
+          check_that_local_does_not_exist:
+            comment: "addon-1: selftest waiver, lower case must still match"
+          YAML
+          sed 's/addon-1: selftest waiver/no ticket here/' waived-ok.yaml > waived-noticket.yaml
+          # A non-string YAML comment must be judged, not crash (upstream #175).
+          printf 'check_that_local_does_not_exist:\n  comment: 1234\n' > waived-int.yaml
+
+      - name: clean package passes cloud
+        id: cloud
+        continue-on-error: true
+        uses: splunk/appinspect-cli-action@v2.17.1
+        with:
+          app_path: clean
+          included_tags: cloud
+          excluded_tags: manual
+          result_file: cloud.json
+
+      - name: tampered, nothing waived, fails
+        id: unwaived
+        continue-on-error: true
+        uses: splunk/appinspect-cli-action@v2.17.1
+        with:
+          app_path: pkg
+          included_tags: cloud
+          excluded_tags: manual
+          result_file: unwaived.json
+          appinspect_expected_failures: does-not-exist.yaml
+
+      - name: tampered, waived with a ticket id, passes
+        id: waived
+        continue-on-error: true
+        uses: splunk/appinspect-cli-action@v2.17.1
+        with:
+          app_path: pkg
+          included_tags: cloud
+          excluded_tags: manual
+          result_file: waived.json
+          appinspect_expected_failures: waived-ok.yaml
+
+      - name: tampered, waiver lacks a ticket id, fails
+        id: noticket
+        continue-on-error: true
+        uses: splunk/appinspect-cli-action@v2.17.1
+        with:
+          app_path: pkg
+          included_tags: cloud
+          excluded_tags: manual
+          result_file: noticket.json
+          appinspect_expected_failures: waived-noticket.yaml
+
+      - name: tampered, numeric comment, fails without crashing
+        id: intcomment
+        continue-on-error: true
+        uses: splunk/appinspect-cli-action@v2.17.1
+        with:
+          app_path: pkg
+          included_tags: cloud
+          excluded_tags: manual
+          result_file: intcomment.json
+          appinspect_expected_failures: waived-int.yaml
+
+      - name: Check outcomes
+        env:
+          CLOUD: ${{ steps.cloud.outcome }}
+          UNWAIVED: ${{ steps.unwaived.outcome }}
+          WAIVED: ${{ steps.waived.outcome }}
+          NOTICKET: ${{ steps.noticket.outcome }}
+          INTCOMMENT: ${{ steps.intcomment.outcome }}
+        run: |
+          echo "cloud=$CLOUD unwaived=$UNWAIVED waived=$WAIVED noticket=$NOTICKET intcomment=$INTCOMMENT"
+          python3 -c "import json; print(json.load(open('cloud.json'))['summary']); print(json.load(open('unwaived.json'))['summary'])"
+          [ "$CLOUD" = success ] && [ "$UNWAIVED" = failure ] && [ "$WAIVED" = success ] \
+            && [ "$NOTICKET" = failure ] && [ "$INTCOMMENT" = failure ]

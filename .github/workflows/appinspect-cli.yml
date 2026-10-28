@@ -36,14 +36,13 @@ jobs:
             name: dist
             path: dist/
         - name: scan
-          # Forked action: upstream 2.17.0 (Python 3.13, AppInspect 4.3.1) built
-          # from the fork's Dockerfile, because upstream's prebuilt image still
-          # carries compare_checks.py's inline (?i) ticket-id regex. That raises
-          # re.error on Python 3.11+, which makes the .appinspect.expect.yaml
-          # waiver mechanism inert: a repo with a documented waiver fails anyway,
-          # with a traceback that says nothing about the app. The fork's selftest
-          # workflow proves the waiver path. See livehybrid/appinspect-cli-action.
-          uses: livehybrid/appinspect-cli-action@v2.17.0-py313
+          # Upstream again since v2.17.1 (Python 3.13, AppInspect 4.3.1). The fork
+          # (livehybrid/appinspect-cli-action@v2.17.0-py313) existed only because
+          # compare_checks.py's inline (?i) ticket-id regex raised re.error on
+          # Python 3.11+, which made .appinspect.expect.yaml waivers inert. Fixed
+          # upstream in splunk/appinspect-cli-action#175. The waiver path is proven
+          # against this exact tag by appinspect-cli-selftest.yml; keep the two in step.
+          uses: splunk/appinspect-cli-action@v2.17.1
           with:
             app_path: dist/
             included_tags: ${{ matrix.tags }}
